@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "data-quality"
+version = "0.1.0"
+description = "独立的数据质量规则校验工具：规则校验与异常样本定位"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+dependencies = []
+
+[project.scripts]
+dq = "data_quality.cli:main"
+
+[tool.setuptools]
+packages = ["data_quality"]
