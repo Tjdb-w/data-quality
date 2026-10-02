@@ -9,7 +9,7 @@
 ## 状态
 
 - 已实现：独立的数据质量规则校验（Python 包 `data_quality` 与命令行 `dq validate`）。
-- 暂不实现：血缘追溯（后续增量）。
+- 已实现：上下游血缘追溯（`trace_lineage` 与命令行 `dq lineage`）。
 
 ## 安装
 
@@ -83,9 +83,60 @@ JSON 相等为结构化比较：对象忽略键顺序、数组按顺序逐项比
 - `InvalidInputError`：`records` 不是列表，或其中元素不是 JSON 对象。
 - `InvalidRuleError`：规则结构错误、未知类型、`id` 为空或重复、`options` 不匹配、`min > max`、`pattern` 不是合法正则等。
 
+## 血缘追溯
+
+`nodes`、`edges` 构成血缘图，边由 `source` 指向 `target`。
+
+```python
+from data_quality import trace_lineage
+
+result = trace_lineage(nodes, edges, target, direction="both", max_depth=None)
+```
+
+- `nodes`：非空、互不重复的非空字符串列表。
+- `edges`：仅含 `source`、`target` 两个键的对象列表，两端必须已在 `nodes` 声明，重复边报错；自环与环路合法。
+- `target`：追溯起点节点 id。
+- `direction`：`upstream`（沿边反向）、`downstream`（沿边正向）或 `both`（默认，两侧都返回）。
+- `max_depth`：`null`（默认，不限深度）或大于等于 0 的整数；布尔值不算整数；`0` 时只含 `target`。
+
+### 血缘返回结果
+
+```json
+{
+  "target": "dwd",
+  "direction": "both",
+  "max_depth": null,
+  "upstream": {
+    "nodes": [{"id": "dwd", "depth": 0}, {"id": "ods", "depth": 1}],
+    "edges": [{"source": "ods", "target": "dwd"}]
+  },
+  "downstream": {
+    "nodes": [{"id": "dwd", "depth": 0}, {"id": "ads", "depth": 1}],
+    "edges": [{"source": "dwd", "target": "ads"}]
+  }
+}
+```
+
+- 结果回显 `target`、`direction`、`max_depth`，并含 `upstream`、`downstream` 两侧，各含 `nodes`、`edges`。
+- 节点为 `{"id", "depth"}`：`target` 深度为 0，每跨一条边加 1；同一节点按最短深度唯一出现，节点按 `(depth, id)` 排序。
+- 边为该侧已到达节点之间的**全部原始边**（不只最短路径树），按 `(source, target)` 排序。
+- 无亲属时该侧 `nodes` 只有 `target`、`edges` 为空；只查一侧时另一侧为 `{"nodes": [], "edges": []}`。
+
+### 血缘错误
+
+以下情况抛出 `ValueError` 子类（均公开于 `data_quality`）：
+
+- `InvalidLineageInputError`：`nodes`/`edges` 缺失或结构有误、节点重复或为空、边含多余/缺失键、端点未声明、边重复。
+- `InvalidLineageQueryError`：`target` 不是字符串、`direction` 不在三者之内、`max_depth` 不是 `null` 或非负整数（含布尔值）。
+- `UnknownLineageTargetError`：`target` 未在 `nodes` 中声明。
+
+校验顺序为图结构 → 查询参数 → target 声明性。
+
 ## 命令行
 
-`dq validate` 从标准输入读取一个 UTF-8 JSON 对象，字段为 `records` 与 `rules`，并以 UTF-8 JSON 输出结果：
+### dq validate
+
+从标准输入读取一个 UTF-8 JSON 对象，字段为 `records` 与 `rules`，并以 UTF-8 JSON 输出结果：
 
 ```bash
 dq validate < payload.json
@@ -102,6 +153,21 @@ dq validate < payload.json
 - `INVALID_JSON`：输入不是合法 UTF-8 或无法解析为 JSON。
 - `INVALID_INPUT`：载荷不是 JSON 对象、缺少 `records`/`rules`、或 `records` 结构错误。
 - `INVALID_RULE`：规则定义非法（未知类型、重复 id、选项冲突、非法正则等）。
+
+### dq lineage
+
+从标准输入读取同字段的 UTF-8 JSON 对象（`nodes`、`edges`、`target` 必填；`direction`、`max_depth` 可省略，默认 `both` 与 `null`）：
+
+```bash
+dq lineage < lineage.json
+```
+
+合法查询退出码为 0 并输出上述血缘结果；输入有误时退出码为 2 且 `message` 非空，错误码依次为：
+
+- `INVALID_JSON`：输入不是合法 UTF-8 或无法解析为 JSON。
+- `INVALID_LINEAGE_INPUT`：`nodes`/`edges` 结构、端点或重复项有误。
+- `INVALID_LINEAGE_QUERY`：`target`/`direction`/`max_depth` 非法。
+- `UNKNOWN_LINEAGE_TARGET`：`target` 未在 `nodes` 中声明。
 
 除标准输入与标准输出外，不写文件、不访问外部服务。
 
