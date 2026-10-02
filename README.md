@@ -9,7 +9,7 @@
 ## 状态
 
 - 已实现：独立的数据质量规则校验（Python 包 `data_quality` 与命令行 `dq validate`）。
-- 暂不实现：血缘追溯（后续增量）。
+- 已实现：上下游血缘追溯（`trace_lineage` 与命令行 `dq lineage`）。
 
 ## 安装
 
@@ -104,6 +104,67 @@ dq validate < payload.json
 - `INVALID_RULE`：规则定义非法（未知类型、重复 id、选项冲突、非法正则等）。
 
 除标准输入与标准输出外，不写文件、不访问外部服务。
+
+## 血缘追溯
+
+### Python API
+
+```python
+from data_quality import trace_lineage
+
+result = trace_lineage(nodes, edges, target, direction="both", max_depth=None)
+```
+
+- `nodes`：非空且互不重复的非空字符串列表，声明全部节点。
+- `edges`：边对象列表，每条边仅含 `source`、`target` 两个字段，表示 `source` 指向 `target`；端点必须已在 `nodes` 中声明，重复边报错。自环与环路合法，遍历必然有限。
+- `target`：起始节点 id（depth 为 0）。
+- `direction`：`"upstream"`（沿边反向扩展）、`"downstream"`（沿边正向扩展）或 `"both"`（默认，返回两侧）。
+- `max_depth`：`None`（默认，不限深度）或大于等于 0 的整数（布尔值不算整数）；`0` 只含 target 本身。
+
+### 返回结果
+
+```json
+{
+  "target": "c",
+  "direction": "both",
+  "max_depth": null,
+  "upstream": {
+    "nodes": [{"id": "c", "depth": 0}, {"id": "a", "depth": 1}],
+    "edges": [{"source": "a", "target": "c"}]
+  },
+  "downstream": {
+    "nodes": [{"id": "c", "depth": 0}, {"id": "d", "depth": 1}],
+    "edges": [{"source": "c", "target": "d"}]
+  }
+}
+```
+
+- 每一侧含 `nodes` 与 `edges`。节点含 `id`、`depth`：target 为 0，每向外相邻一层加 1；每个节点按最短 depth 唯一出现，按 `depth`、`id` 排序。
+- `edges` 为两侧端点都在本侧节点集合内的全部原始边，按 `source`、`target` 排序。
+- 无亲属时该侧 `nodes` 只有 target、`edges` 为空；单侧查询时另一侧为空。
+
+### 错误
+
+以下情况抛出 `ValueError` 子类（均位于 `data_quality`）：
+
+- `InvalidLineageInputError`：`nodes`/`edges` 缺失或结构、端点、重复项有误。
+- `InvalidLineageQueryError`：`direction`、`max_depth` 或 `target` 非法。
+- `UnknownLineageTargetError`：`target` 未在 `nodes` 中声明。
+
+### 命令行
+
+`dq lineage` 从标准输入读取一个 UTF-8 JSON 对象，字段为 `nodes`、`edges`、`target` 与可省略的 `direction`、`max_depth`，并以 UTF-8 JSON 输出结果：
+
+```bash
+dq lineage < lineage.json
+```
+
+合法查询退出码为 0；输入有误时退出码为 2，并向标准输出写入 `{"error": {"code": ..., "message": ...}}`（`message` 非空）。错误码：
+
+- `INVALID_JSON`：输入不是合法 UTF-8 或无法解析为 JSON。
+- `INVALID_LINEAGE_INPUT`：`nodes`/`edges` 结构、端点或重复项有误。
+- `INVALID_LINEAGE_QUERY`：`direction`、`max_depth` 或 `target` 非法。
+- `UNKNOWN_LINEAGE_TARGET`：`target` 未在 `nodes` 中声明。
 
 ## 测试
 

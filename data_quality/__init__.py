@@ -1,8 +1,11 @@
-"""data_quality: standalone data quality rule validation.
+"""data_quality: data quality rule validation and lineage tracing."""
 
-Lineage tracing is intentionally out of scope for this version.
-"""
-
+from .lineage import (
+    InvalidLineageInputError,
+    InvalidLineageQueryError,
+    UnknownLineageTargetError,
+    trace_lineage,
+)
 from .validator import (
     InvalidInputError,
     InvalidRuleError,
@@ -15,6 +18,10 @@ __all__ = [
     "DataQualityError",
     "InvalidInputError",
     "InvalidRuleError",
+    "trace_lineage",
+    "InvalidLineageInputError",
+    "InvalidLineageQueryError",
+    "UnknownLineageTargetError",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
