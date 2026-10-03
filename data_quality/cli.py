@@ -1,4 +1,5 @@
-"""Command line interface: ``dq validate``, ``dq lineage``, ``dq field-lineage``.
+"""Command line interface: ``dq validate``, ``dq lineage``,
+``dq field-lineage``, ``dq correlate``.
 
 All subcommands read a UTF-8 JSON object from standard input and write a
 UTF-8 JSON result to standard output.
@@ -10,20 +11,24 @@ are optional.
 ``dq field-lineage`` reads ``{"fields": {...}, "edges": [...], "target": ...,
 "direction": ..., "max_depth": ...}`` where ``direction`` and ``max_depth``
 are optional.
+``dq correlate`` reads ``{"results": [...], "lineage": {...}}``.
 
 Error JSON has the shape ``{"error": {"code": ..., "message": ...}}`` and
 the process exits with status 2:
 
-* ``INVALID_JSON``                  - stdin is not parseable UTF-8 JSON
-* ``INVALID_INPUT``                 - validate payload/records is malformed
-* ``INVALID_RULE``                  - a validate rule is malformed/conflicting
-* ``INVALID_LINEAGE_INPUT``         - lineage nodes/edges are missing/malformed
-* ``INVALID_LINEAGE_QUERY``         - lineage target/direction/max_depth is bad
-* ``UNKNOWN_LINEAGE_TARGET``        - lineage target is not declared in nodes
-* ``INVALID_FIELD_LINEAGE_INPUT``   - field-lineage fields/edges are malformed
-* ``INVALID_FIELD_LINEAGE_QUERY``   - field-lineage target/direction/max_depth
-                                      is invalid
-* ``UNKNOWN_FIELD_LINEAGE_TARGET``  - field-lineage target is not declared
+* ``INVALID_JSON``                    - stdin is not parseable UTF-8 JSON
+* ``INVALID_INPUT``                   - validate payload/records is malformed
+* ``INVALID_RULE``                    - a validate rule is malformed/conflicting
+* ``INVALID_LINEAGE_INPUT``           - lineage nodes/edges are missing/malformed
+* ``INVALID_LINEAGE_QUERY``           - lineage target/direction/max_depth is bad
+* ``UNKNOWN_LINEAGE_TARGET``          - lineage target is not declared in nodes
+* ``INVALID_FIELD_LINEAGE_INPUT``     - field-lineage fields/edges are malformed
+* ``INVALID_FIELD_LINEAGE_QUERY``     - field-lineage target/direction/max_depth
+                                        is invalid
+* ``UNKNOWN_FIELD_LINEAGE_TARGET``    - field-lineage target is not declared
+* ``INVALID_CORRELATION_INPUT``       - correlate results/lineage are malformed
+* ``UNKNOWN_CORRELATION_REFERENCE``   - correlate result references an
+                                        undeclared dataset or field
 """
 
 from __future__ import annotations
@@ -33,6 +38,11 @@ import json
 import sys
 from typing import Any, List, Optional
 
+from .correlation import (
+    InvalidCorrelationInputError,
+    UnknownCorrelationReferenceError,
+    correlate_violations,
+)
 from .field_lineage import (
     InvalidFieldLineageInputError,
     InvalidFieldLineageQueryError,
@@ -175,6 +185,31 @@ def _run_field_lineage() -> int:
     return EXIT_OK
 
 
+def _run_correlate() -> int:
+    payload = _read_json_payload()
+    if payload is _PARSE_FAILED:
+        return EXIT_ERROR
+
+    if not isinstance(payload, dict):
+        return _emit_error(
+            "INVALID_CORRELATION_INPUT", "input payload must be a JSON object"
+        )
+
+    try:
+        result = correlate_violations(
+            payload.get("results"),
+            payload.get("lineage"),
+        )
+    except InvalidCorrelationInputError as exc:
+        return _emit_error("INVALID_CORRELATION_INPUT", str(exc))
+    except UnknownCorrelationReferenceError as exc:
+        return _emit_error("UNKNOWN_CORRELATION_REFERENCE", str(exc))
+
+    json.dump(result, sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+    return EXIT_OK
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="dq",
@@ -201,6 +236,13 @@ def build_parser() -> argparse.ArgumentParser:
         "JSON object on standard input",
     )
     field_lineage_parser.set_defaults(handler=_run_field_lineage)
+
+    correlate_parser = subparsers.add_parser(
+        "correlate",
+        help="group violation results into cross-rule correlation events "
+        "from a UTF-8 JSON object on standard input",
+    )
+    correlate_parser.set_defaults(handler=_run_correlate)
     return parser
 
 

@@ -1,5 +1,10 @@
 """data_quality: standalone data quality rule validation and lineage tracing."""
 
+from .correlation import (
+    InvalidCorrelationInputError,
+    UnknownCorrelationReferenceError,
+    correlate_violations,
+)
 from .field_lineage import (
     InvalidFieldLineageInputError,
     InvalidFieldLineageQueryError,
@@ -23,6 +28,7 @@ __all__ = [
     "validate",
     "trace_lineage",
     "trace_field_lineage",
+    "correlate_violations",
     "DataQualityError",
     "InvalidInputError",
     "InvalidRuleError",
@@ -32,6 +38,8 @@ __all__ = [
     "InvalidFieldLineageInputError",
     "InvalidFieldLineageQueryError",
     "UnknownFieldLineageTargetError",
+    "InvalidCorrelationInputError",
+    "UnknownCorrelationReferenceError",
 ]
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"

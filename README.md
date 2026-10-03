@@ -11,6 +11,7 @@
 - 已实现：独立的数据质量规则校验（Python 包 `data_quality` 与命令行 `dq validate`）。
 - 已实现：上下游血缘追溯（`trace_lineage` 与命令行 `dq lineage`）。
 - 已实现：字段级上下游血缘追溯（`trace_field_lineage` 与命令行 `dq field-lineage`）。
+- 已实现：异常样本跨规则关联定位（`correlate_violations` 与命令行 `dq correlate`）。
 
 ## 安装
 
@@ -198,6 +199,61 @@ result = trace_field_lineage(fields, edges, target, direction="both", max_depth=
 
 校验顺序为图结构 → 查询参数 → target 声明性。
 
+## 异常样本跨规则关联定位
+
+`correlate_violations` 把一批带稳定样本标识的校验结果与一张字段级血缘图合并，把同一样本上由同一字段或其血缘相邻字段触发的违规归入一个关联事件。
+
+```python
+from data_quality import correlate_violations
+
+result = correlate_violations(results, lineage)
+```
+
+- `results`：校验结果对象列表，每条恰好包含六个键：
+  - `rule_id`、`dataset_id`、`field_id`、`sample_id`：非空字符串；任一为空（或非字符串）抛出 `ValueError`。
+  - `violated`：布尔值；`false` 的记录只参与校验，不产生事件。
+  - `value`：任意 JSON 值（违规值，可为 `null`）。
+  - 同一规则对同一样本重复出现时只保留一条；若重复记录内容（数据集、字段、是否违规、违规值）冲突则抛出 `ValueError`。
+- `lineage`：血缘图对象，恰好包含三个键：
+  - `datasets`：互不重复的非空数据集 id 列表（数据集节点，可为空列表）。
+  - `fields`：对象，键为已声明的数据集 id，值为互不重复的非空字段 id 列表（字段节点）。
+  - `edges`：类型化上下游边列表，每条恰好含 `source`、`target`、`type` 三键；两端为 `{"dataset": ..., "field": ...}` 且必须已在 `fields` 声明（悬空边报错）；`type` 只能是 `upstream`（target 是 source 的直接上游）或 `downstream`（target 是 source 的直接下游）。等价重述的边只保留一条；相互矛盾的重复边（同一对字段被同时断言为相反方向）抛出 `ValueError`。
+- 校验结果引用未在血缘图中声明的数据集或字段时抛出 `LookupError`。
+
+### 关联定位返回结果
+
+```json
+{
+  "events": [
+    {
+      "sample_id": "样本-1",
+      "rules": ["r1", "r2"],
+      "fields": [
+        {"dataset": "dwd", "field": "label"},
+        {"dataset": "ods", "field": "name"}
+      ],
+      "upstream_fields": [],
+      "downstream_fields": [{"dataset": "ads", "field": "label"}]
+    }
+  ]
+}
+```
+
+- 同一样本上，只要两个违规字段之间存在一条有效血缘边（任一方向）就连通；连通分量即一个事件。仅因同属一个数据集但没有血缘边的字段不会被错误合并。
+- `rules` 为事件内违规规则 id，按规则标识升序排列。
+- `fields` 为受影响字段集合，`upstream_fields` / `downstream_fields` 为受影响字段在血缘图中的直接上游 / 直接下游字段（不含事件内字段本身）；三者均去重并按 `(dataset, field)` 稳定排序。
+- 事件按 `sample_id` 排序输出；无违规结果时返回 `{"events": []}`，不产生仅含空字段的占位事件。
+- 相同输入始终得到完全相同的结果；时间信息、随机标识与未提供的外部元数据不会进入结果，输入的校验记录与血缘图不会被改写。
+
+### 关联定位错误
+
+以下情况抛出异常（均公开于 `data_quality`）：
+
+- `InvalidCorrelationInputError`（`ValueError` 子类）：`results`/`lineage` 结构有误、标识为空、重复记录内容冲突、边含多余/缺失键、悬空边、非法边类型、相互矛盾的重复边。
+- `UnknownCorrelationReferenceError`（`LookupError` 子类）：校验结果引用了未声明的数据集或字段。
+
+校验顺序为血缘图结构 → 校验结果结构（含重复冲突）→ 引用解析。
+
 ## 命令行
 
 ### dq validate
@@ -249,6 +305,20 @@ dq field-lineage < field-lineage.json
 - `INVALID_FIELD_LINEAGE_INPUT`：`fields`/`edges` 结构、端点或重复项有误。
 - `INVALID_FIELD_LINEAGE_QUERY`：`target`/`direction`/`max_depth` 非法。
 - `UNKNOWN_FIELD_LINEAGE_TARGET`：`target` 未在 `fields` 中声明。
+
+### dq correlate
+
+从标准输入读取异常关联定位的 UTF-8 JSON 对象（`results`、`lineage` 均必填）：
+
+```bash
+dq correlate < correlate.json
+```
+
+合法输入退出码为 0 并输出上述关联事件结果；输入有误时退出码为 2 且 `message` 非空，错误码依次为：
+
+- `INVALID_JSON`：输入不是合法 UTF-8 或无法解析为 JSON。
+- `INVALID_CORRELATION_INPUT`：`results`/`lineage` 结构、标识、重复记录或边有误。
+- `UNKNOWN_CORRELATION_REFERENCE`：校验结果引用了未声明的数据集或字段。
 
 除标准输入与标准输出外，不写文件、不访问外部服务。
 
