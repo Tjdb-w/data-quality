@@ -11,6 +11,7 @@
 - 已实现：独立的数据质量规则校验（Python 包 `data_quality` 与命令行 `dq validate`）。
 - 已实现：上下游血缘追溯（`trace_lineage` 与命令行 `dq lineage`）。
 - 已实现：字段级上下游血缘追溯（`trace_field_lineage` 与命令行 `dq field-lineage`）。
+- 已实现：异常样本跨规则关联定位（`correlate_sample_anomalies` 与命令行 `dq correlate-anomalies`）。
 
 ## 安装
 
@@ -198,6 +199,65 @@ result = trace_field_lineage(fields, edges, target, direction="both", max_depth=
 
 校验顺序为图结构 → 查询参数 → target 声明性。
 
+## 异常样本跨规则关联定位
+
+把一批带稳定样本标识的校验结果与一份字段血缘图同时提交；同一样本上由同一字段或血缘相邻字段（一条有效边直接相连）触发的违规归入一个关联事件。仅同属一个数据集而无血缘边的字段不会被合并。
+
+```python
+from data_quality import correlate_sample_anomalies
+
+result = correlate_sample_anomalies(results, lineage_graph)
+```
+
+- `results`：校验结果列表，每条结果只含以下键：
+  - `rule_id`、`dataset_id`、`field_id`、`sample_id`：均为非空字符串。
+  - `is_violation`：布尔值（`true`/`false`，不接受 `1`/`0`）。
+  - `violating_value`：违规值，任意 JSON 值；未违规则通常为 `null`。
+- `lineage_graph`：`{"nodes": [...], "edges": [...]}`。
+  - `nodes`：`{"dataset_id", "field_id"}` 对象列表，互不重复。
+  - `edges`：只含 `source`、`target`、`type` 三个键；两端均为已声明字段，`type` 只能是 `upstream`（`target` 喂给 `source`）或 `downstream`（`source` 喂给 `target`）。重复边必须表达相同流向，相互矛盾时报错。
+
+### 关联规则
+
+- 按 `sample_id` 分别处理：同一 `(sample_id, rule_id)` 重复出现且内容完全一致时只保留一条；内容冲突（字段、是否违规或违规值不一致）抛出 `ValueError`。
+- 每个样本只取违规结果（`is_violation` 为 `true`）建图；通过的结果不产生事件。全部通过或 `results` 为空时返回 `{"events": []}`，不会产生仅含空字段的占位事件。
+- 事件内字段彼此为同一字段或由有效边逐跳相连（中间字段也须在该样本上违规才会连通两侧）；没有任何边相连的字段分属不同事件。
+
+### 关联返回结果
+
+```json
+{
+  "events": [
+    {
+      "sample_id": "s-1",
+      "rule_ids": ["range-age", "regex-age-bucket"],
+      "fields": [
+        {"dataset_id": "ods", "field_id": "age"},
+        {"dataset_id": "dwd", "field_id": "age_bucket"}
+      ],
+      "upstream_fields": [{"dataset_id": "raw", "field_id": "age"}],
+      "downstream_fields": [{"dataset_id": "ads", "field_id": "age_group"}]
+    }
+  ]
+}
+```
+
+- `rule_ids` 按规则标识排序去重；`fields` 为该事件承载违规的字段集合。
+- `upstream_fields` / `downstream_fields` 为事件字段的**直接**上游/下游邻居（各只跨一条边），不含事件自身字段；自环不产生邻居。
+- 所有集合按 `(dataset_id, field_id)` 排序去重；事件按 `sample_id` 排序（同一样本的多个事件相邻，顺序按其最小字段稳定确定）。相同输入始终得到完全相同的结果，结果中不引入时间信息、随机标识或未提供的外部元数据。
+- 原始校验记录与血缘边均不会被改写。
+
+### 关联错误
+
+以下情况抛出异常（均公开于 `data_quality`）：
+
+- `InvalidCorrelationInputError`（`ValueError` 子类）：`results` 不是列表、元素不是对象、键缺失或多余、任一标识为空或非字符串、`is_violation` 不是布尔值。
+- `InvalidCorrelationGraphError`（`ValueError` 子类）：`lineage_graph` 结构有误、节点为空/重复、边含多余或缺失键、边类型非法、悬空边（端点未声明）或相互矛盾的重复边。
+- `UnknownCorrelationReferenceError`（**`LookupError` 子类**）：校验结果引用了未在 `nodes` 声明的数据集或字段（通过结果同样受此约束）。
+- 同一 `(sample_id, rule_id)` 的重复记录内容冲突时抛出普通 `ValueError`。
+
+校验顺序为结果结构 → 图结构 → 引用声明性 → 重复记录一致性。
+
 ## 命令行
 
 ### dq validate
@@ -249,6 +309,22 @@ dq field-lineage < field-lineage.json
 - `INVALID_FIELD_LINEAGE_INPUT`：`fields`/`edges` 结构、端点或重复项有误。
 - `INVALID_FIELD_LINEAGE_QUERY`：`target`/`direction`/`max_depth` 非法。
 - `UNKNOWN_FIELD_LINEAGE_TARGET`：`target` 未在 `fields` 中声明。
+
+### dq correlate-anomalies
+
+从标准输入读取 UTF-8 JSON 对象，字段为 `results` 与 `lineage_graph`：
+
+```bash
+dq correlate-anomalies < anomalies.json
+```
+
+合法输入退出码为 0 并输出上述关联事件结果（无违规时输出 `{"events": []}`）；输入有误时退出码为 2，错误码依次为：
+
+- `INVALID_JSON`：输入不是合法 UTF-8 或无法解析为 JSON。
+- `INVALID_CORRELATION_INPUT`：载荷不是 JSON 对象、缺少 `results`，或校验结果结构/标识非法。
+- `INVALID_CORRELATION_GRAPH`：缺少 `lineage_graph`，或节点/边结构、边类型、悬空边、矛盾重复边有误。
+- `CONFLICTING_CORRELATION_RESULT`：同一 `(sample_id, rule_id)` 的重复记录内容冲突。
+- `UNKNOWN_CORRELATION_REFERENCE`：校验结果引用了未声明的数据集或字段。
 
 除标准输入与标准输出外，不写文件、不访问外部服务。
 
