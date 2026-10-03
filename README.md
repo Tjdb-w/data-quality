@@ -10,6 +10,7 @@
 
 - 已实现：独立的数据质量规则校验（Python 包 `data_quality` 与命令行 `dq validate`）。
 - 已实现：上下游血缘追溯（`trace_lineage` 与命令行 `dq lineage`）。
+- 已实现：字段级血缘追溯（`trace_field_lineage` 与命令行 `dq field-lineage`）。
 
 ## 安装
 
@@ -132,6 +133,65 @@ result = trace_lineage(nodes, edges, target, direction="both", max_depth=None)
 
 校验顺序为图结构 → 查询参数 → target 声明性。
 
+## 字段级血缘
+
+`fields`、`edges` 构成字段级血缘图，字段由 `(table, column)` 标识，边由 `source` 指向 `target`。
+
+```python
+from data_quality import trace_field_lineage
+
+result = trace_field_lineage(fields, edges, target, direction="both", max_depth=None)
+```
+
+- `fields`：对象，键为非空表 id，值为该表互不重复的非空字段 id 列表；对象本身及每个列表均非空。
+- `edges`：仅含 `source`、`target` 两个键的对象列表；每个端点只含 `table`、`column` 两个键且必须已在 `fields` 声明；重复边报错，自环与环路合法。不同表中的同名字段是不同字段。
+- `target`：`{"table": ..., "column": ...}` 形式的追溯起点字段。
+- `direction`：`upstream`（沿边反向）、`downstream`（沿边正向）或 `both`（默认，两侧都返回）。
+- `max_depth`：`null`（默认，不限深度）或大于等于 0 的整数；布尔值不算整数；`0` 时只含 `target`。
+
+### 字段级血缘返回结果
+
+```json
+{
+  "target": {"table": "dwd", "column": "id"},
+  "direction": "both",
+  "max_depth": null,
+  "upstream": {
+    "fields": [
+      {"table": "dwd", "column": "id", "depth": 0},
+      {"table": "ods", "column": "id", "depth": 1}
+    ],
+    "edges": [
+      {"source": {"table": "ods", "column": "id"}, "target": {"table": "dwd", "column": "id"}}
+    ]
+  },
+  "downstream": {
+    "fields": [
+      {"table": "dwd", "column": "id", "depth": 0},
+      {"table": "ads", "column": "id", "depth": 1}
+    ],
+    "edges": [
+      {"source": {"table": "dwd", "column": "id"}, "target": {"table": "ads", "column": "id"}}
+    ]
+  }
+}
+```
+
+- 结果回显 `target`、`direction`、`max_depth`，并含 `upstream`、`downstream` 两侧，各含 `fields`、`edges`。
+- 字段为 `{"table", "column", "depth"}`：`target` 深度为 0，每跨一条边加 1；同一字段按最短深度唯一出现，字段按 `(depth, table, column)` 排序。
+- 边保留输入时的原始对象，为该侧已到达字段之间的**全部原始边**（不只最短路径树），按 `(source.table, source.column, target.table, target.column)` 排序。
+- 无亲属时该侧 `fields` 只有 `target`、`edges` 为空；只查一侧时另一侧为 `{"fields": [], "edges": []}`。
+
+### 字段级血缘错误
+
+以下情况抛出 `ValueError` 子类（均公开于 `data_quality`）：
+
+- `InvalidFieldLineageInputError`：`fields`/`edges` 缺失或结构有误、表 id 或字段 id 为空/重复、边或端点含多余/缺失键、端点未声明、边重复。
+- `InvalidFieldLineageQueryError`：`target` 不是只含 `table`/`column` 的对象或其值不是字符串、`direction` 不在三者之内、`max_depth` 不是 `null` 或非负整数（含布尔值）。
+- `UnknownFieldLineageTargetError`：`target` 未在 `fields` 中声明。
+
+校验顺序为图结构 → 查询参数 → target 声明性。
+
 ## 命令行
 
 ### dq validate
@@ -168,6 +228,21 @@ dq lineage < lineage.json
 - `INVALID_LINEAGE_INPUT`：`nodes`/`edges` 结构、端点或重复项有误。
 - `INVALID_LINEAGE_QUERY`：`target`/`direction`/`max_depth` 非法。
 - `UNKNOWN_LINEAGE_TARGET`：`target` 未在 `nodes` 中声明。
+
+### dq field-lineage
+
+从标准输入读取 UTF-8 JSON 对象（`fields`、`edges`、`target` 必填；`direction`、`max_depth` 可省略，默认 `both` 与 `null`）：
+
+```bash
+dq field-lineage < field_lineage.json
+```
+
+合法查询退出码为 0 并输出上述字段级血缘结果；输入有误时退出码为 2 且 `message` 非空，错误码依次为：
+
+- `INVALID_JSON`：输入不是合法 UTF-8 或无法解析为 JSON。
+- `INVALID_FIELD_LINEAGE_INPUT`：`fields`/`edges` 结构、端点或重复项有误。
+- `INVALID_FIELD_LINEAGE_QUERY`：`target`/`direction`/`max_depth` 非法。
+- `UNKNOWN_FIELD_LINEAGE_TARGET`：`target` 未在 `fields` 中声明。
 
 除标准输入与标准输出外，不写文件、不访问外部服务。
 

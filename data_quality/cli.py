@@ -1,10 +1,14 @@
-"""Command line interface: ``dq validate`` and ``dq lineage``.
+"""Command line interface: ``dq validate``, ``dq lineage`` and
+``dq field-lineage``.
 
 Both subcommands read a UTF-8 JSON object from standard input and write a
 UTF-8 JSON result to standard output.
 
 ``dq validate`` reads ``{"records": [...], "rules": [...]}``.
 ``dq lineage`` reads ``{"nodes": [...], "edges": [...], "target": ...,
+"direction": ..., "max_depth": ...}`` where ``direction`` and ``max_depth``
+are optional.
+``dq field-lineage`` reads ``{"fields": {...}, "edges": [...], "target": ...,
 "direction": ..., "max_depth": ...}`` where ``direction`` and ``max_depth``
 are optional.
 
@@ -17,6 +21,9 @@ the process exits with status 2:
 * ``INVALID_LINEAGE_INPUT``   - lineage nodes/edges are missing or malformed
 * ``INVALID_LINEAGE_QUERY``   - lineage target/direction/max_depth is invalid
 * ``UNKNOWN_LINEAGE_TARGET``  - lineage target is not declared in nodes
+* ``INVALID_FIELD_LINEAGE_INPUT``  - field lineage fields/edges are malformed
+* ``INVALID_FIELD_LINEAGE_QUERY``  - field lineage query arguments are invalid
+* ``UNKNOWN_FIELD_LINEAGE_TARGET`` - field lineage target is not declared
 """
 
 from __future__ import annotations
@@ -26,6 +33,12 @@ import json
 import sys
 from typing import Any, List, Optional
 
+from .field_lineage import (
+    InvalidFieldLineageInputError,
+    InvalidFieldLineageQueryError,
+    UnknownFieldLineageTargetError,
+    trace_field_lineage,
+)
 from .lineage import (
     InvalidLineageInputError,
     InvalidLineageQueryError,
@@ -132,6 +145,36 @@ def _run_lineage() -> int:
     return EXIT_OK
 
 
+def _run_field_lineage() -> int:
+    payload = _read_json_payload()
+    if payload is _PARSE_FAILED:
+        return EXIT_ERROR
+
+    if not isinstance(payload, dict):
+        return _emit_error(
+            "INVALID_FIELD_LINEAGE_INPUT", "input payload must be a JSON object"
+        )
+
+    try:
+        result = trace_field_lineage(
+            payload.get("fields"),
+            payload.get("edges"),
+            payload.get("target"),
+            payload.get("direction", "both"),
+            payload.get("max_depth", None),
+        )
+    except InvalidFieldLineageInputError as exc:
+        return _emit_error("INVALID_FIELD_LINEAGE_INPUT", str(exc))
+    except InvalidFieldLineageQueryError as exc:
+        return _emit_error("INVALID_FIELD_LINEAGE_QUERY", str(exc))
+    except UnknownFieldLineageTargetError as exc:
+        return _emit_error("UNKNOWN_FIELD_LINEAGE_TARGET", str(exc))
+
+    json.dump(result, sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+    return EXIT_OK
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="dq",
@@ -151,6 +194,13 @@ def build_parser() -> argparse.ArgumentParser:
         "on standard input",
     )
     lineage_parser.set_defaults(handler=_run_lineage)
+
+    field_lineage_parser = subparsers.add_parser(
+        "field-lineage",
+        help="trace upstream/downstream field-level lineage from a UTF-8 "
+        "JSON object on standard input",
+    )
+    field_lineage_parser.set_defaults(handler=_run_field_lineage)
     return parser
 
 
