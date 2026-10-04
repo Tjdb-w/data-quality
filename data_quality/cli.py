@@ -1,5 +1,6 @@
 """Command line interface: ``dq validate``, ``dq lineage``,
-``dq field-lineage``, ``dq correlate``.
+``dq field-lineage``, ``dq lineage-paths``, ``dq field-lineage-paths``,
+``dq correlate``.
 
 All subcommands read a UTF-8 JSON object from standard input and write a
 UTF-8 JSON result to standard output.
@@ -11,6 +12,10 @@ are optional.
 ``dq field-lineage`` reads ``{"fields": {...}, "edges": [...], "target": ...,
 "direction": ..., "max_depth": ...}`` where ``direction`` and ``max_depth``
 are optional.
+``dq lineage-paths`` reads the same payload as ``dq lineage`` and explains
+the concrete upstream/downstream paths of the target.
+``dq field-lineage-paths`` reads the same payload as ``dq field-lineage``
+and explains the concrete field-level upstream/downstream paths.
 ``dq correlate`` reads ``{"results": [...], "lineage": {...}}``.
 
 Error JSON has the shape ``{"error": {"code": ..., "message": ...}}`` and
@@ -26,6 +31,7 @@ the process exits with status 2:
 * ``INVALID_FIELD_LINEAGE_QUERY``     - field-lineage target/direction/max_depth
                                         is invalid
 * ``UNKNOWN_FIELD_LINEAGE_TARGET``    - field-lineage target is not declared
+* ``LINEAGE_NODE_NOT_FOUND``          - lineage-paths target is not declared
 * ``INVALID_CORRELATION_INPUT``       - correlate results/lineage are malformed
 * ``UNKNOWN_CORRELATION_REFERENCE``   - correlate result references an
                                         undeclared dataset or field
@@ -54,6 +60,11 @@ from .lineage import (
     InvalidLineageQueryError,
     UnknownLineageTargetError,
     trace_lineage,
+)
+from .lineage_paths import (
+    LineageNodeNotFoundError,
+    explain_field_lineage_paths,
+    explain_lineage_paths,
 )
 from .validator import (
     DataQualityError,
@@ -185,6 +196,66 @@ def _run_field_lineage() -> int:
     return EXIT_OK
 
 
+def _run_lineage_paths() -> int:
+    payload = _read_json_payload()
+    if payload is _PARSE_FAILED:
+        return EXIT_ERROR
+
+    if not isinstance(payload, dict):
+        return _emit_error(
+            "INVALID_LINEAGE_INPUT", "input payload must be a JSON object"
+        )
+
+    try:
+        result = explain_lineage_paths(
+            payload.get("nodes"),
+            payload.get("edges"),
+            payload.get("target"),
+            payload.get("direction", "both"),
+            payload.get("max_depth", None),
+        )
+    except InvalidLineageInputError as exc:
+        return _emit_error("INVALID_LINEAGE_INPUT", str(exc))
+    except InvalidLineageQueryError as exc:
+        return _emit_error("INVALID_LINEAGE_QUERY", str(exc))
+    except LineageNodeNotFoundError as exc:
+        return _emit_error(exc.code, str(exc))
+
+    json.dump(result, sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+    return EXIT_OK
+
+
+def _run_field_lineage_paths() -> int:
+    payload = _read_json_payload()
+    if payload is _PARSE_FAILED:
+        return EXIT_ERROR
+
+    if not isinstance(payload, dict):
+        return _emit_error(
+            "INVALID_FIELD_LINEAGE_INPUT", "input payload must be a JSON object"
+        )
+
+    try:
+        result = explain_field_lineage_paths(
+            payload.get("fields"),
+            payload.get("edges"),
+            payload.get("target"),
+            payload.get("direction", "both"),
+            payload.get("max_depth", None),
+        )
+    except InvalidFieldLineageInputError as exc:
+        return _emit_error("INVALID_FIELD_LINEAGE_INPUT", str(exc))
+    except InvalidFieldLineageQueryError as exc:
+        return _emit_error("INVALID_FIELD_LINEAGE_QUERY", str(exc))
+    except LineageNodeNotFoundError as exc:
+        return _emit_error(exc.code, str(exc))
+
+    json.dump(result, sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+    return EXIT_OK
+
+
 def _run_correlate() -> int:
     payload = _read_json_payload()
     if payload is _PARSE_FAILED:
@@ -236,6 +307,20 @@ def build_parser() -> argparse.ArgumentParser:
         "JSON object on standard input",
     )
     field_lineage_parser.set_defaults(handler=_run_field_lineage)
+
+    lineage_paths_parser = subparsers.add_parser(
+        "lineage-paths",
+        help="explain ordered upstream/downstream lineage paths from a "
+        "UTF-8 JSON object on standard input",
+    )
+    lineage_paths_parser.set_defaults(handler=_run_lineage_paths)
+
+    field_lineage_paths_parser = subparsers.add_parser(
+        "field-lineage-paths",
+        help="explain ordered upstream/downstream field-level lineage paths "
+        "from a UTF-8 JSON object on standard input",
+    )
+    field_lineage_paths_parser.set_defaults(handler=_run_field_lineage_paths)
 
     correlate_parser = subparsers.add_parser(
         "correlate",

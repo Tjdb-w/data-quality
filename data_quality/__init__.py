@@ -17,6 +17,11 @@ from .lineage import (
     UnknownLineageTargetError,
     trace_lineage,
 )
+from .lineage_paths import (
+    LineageNodeNotFoundError,
+    explain_field_lineage_paths,
+    explain_lineage_paths,
+)
 from .validator import (
     InvalidInputError,
     InvalidRuleError,
@@ -28,6 +33,8 @@ __all__ = [
     "validate",
     "trace_lineage",
     "trace_field_lineage",
+    "explain_lineage_paths",
+    "explain_field_lineage_paths",
     "correlate_violations",
     "DataQualityError",
     "InvalidInputError",
@@ -38,8 +45,9 @@ __all__ = [
     "InvalidFieldLineageInputError",
     "InvalidFieldLineageQueryError",
     "UnknownFieldLineageTargetError",
+    "LineageNodeNotFoundError",
     "InvalidCorrelationInputError",
     "UnknownCorrelationReferenceError",
 ]
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"

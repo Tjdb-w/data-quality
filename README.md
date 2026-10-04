@@ -11,6 +11,7 @@
 - 已实现：独立的数据质量规则校验（Python 包 `data_quality` 与命令行 `dq validate`）。
 - 已实现：上下游血缘追溯（`trace_lineage` 与命令行 `dq lineage`）。
 - 已实现：字段级上下游血缘追溯（`trace_field_lineage` 与命令行 `dq field-lineage`）。
+- 已实现：血缘路径解释与影响范围查询（`explain_lineage_paths` / `explain_field_lineage_paths` 与命令行 `dq lineage-paths` / `dq field-lineage-paths`）。
 - 已实现：异常样本跨规则关联定位（`correlate_violations` 与命令行 `dq correlate`）。
 
 ## 安装
@@ -199,6 +200,67 @@ result = trace_field_lineage(fields, edges, target, direction="both", max_depth=
 
 校验顺序为图结构 → 查询参数 → target 声明性。
 
+## 血缘路径解释与影响范围查询
+
+在既有血缘图上，`explain_lineage_paths`（节点级）与 `explain_field_lineage_paths`（字段级）把目标节点到上游来源、下游受影响对象之间的**实际有序路径**逐条返回。入参与 `trace_lineage` / `trace_field_lineage` 完全相同，校验规则与错误语义复用既有实现；本功能只返回内存中的查询结果，不新增任何落盘行为。
+
+```python
+from data_quality import explain_lineage_paths, explain_field_lineage_paths
+
+result = explain_lineage_paths(nodes, edges, target, direction="both", max_depth=None)
+```
+
+- `nodes` / `fields` / `edges` / `target` / `direction` / `max_depth`：与血缘追溯接口一致，`upstream` 沿边反向回溯来源，`downstream` 沿边正向传播到直接与间接依赖对象。
+- 每个方向枚举从 `target` 出发的全部**简单路径**：同一节点可在不同路径中出现，但同一条路径不会重复经过节点，因此不会因环而无限延伸。
+- `max_depth` 限制每条路径的边数；`0` 时该方向只含一条仅含目标节点的路径。
+
+### 路径解释返回结果
+
+```json
+{
+  "target": "dwd",
+  "direction": "both",
+  "max_depth": null,
+  "upstream": {
+    "paths": [
+      {
+        "depth": 2,
+        "nodes": [
+          {"node": {"id": "dwd", "depth": 0}, "edge": null},
+          {"node": {"id": "ods", "depth": 1}, "edge": {"source": "ods", "target": "dwd"}},
+          {"node": {"id": "raw", "depth": 2}, "edge": {"source": "raw", "target": "ods"}}
+        ]
+      }
+    ],
+    "cycle": false,
+    "cycle_nodes": [],
+    "cycle_edges": []
+  },
+  "downstream": {
+    "paths": [],
+    "cycle": false,
+    "cycle_nodes": [],
+    "cycle_edges": []
+  }
+}
+```
+
+- 结果回显 `target`、`direction`、`max_depth`，并含 `upstream`、`downstream` 两侧；只查一侧时另一侧为 `{"paths": [], "cycle": false, "cycle_nodes": [], "cycle_edges": []}`。
+- 每条路径含 `depth`（边数）与有序的 `nodes` 步骤；每一步含：
+  - `node`：稳定可识别的节点标识与可展示名称。节点级为 `{"id", "depth"}`；字段级为 `{"table", "column", "depth"}`（表名、字段名）。`depth` 即该节点在路径中的先后位置，目标节点为 0。
+  - `edge`：造成该关系的**直接边**，为造成本节点与上一节点关系的原始边对象；目标节点处为 `null`。
+- 路径按 `(depth, 路径节点稳定标识序列, 路径边稳定标识序列)` 排序，相同输入重复查询结果完全一致。
+- 目标存在但某方向没有任何关系时，该方向为正常成功结果（退出码 0、无 error 包装）、`paths` 为空数组，不视为异常。
+- 发现环时 `cycle` 为 `true`，`cycle_nodes` 为环上节点（按稳定标识排序），`cycle_edges` 为组成环的有向边（含闭合环的回边，按边稳定标识排序）；已经确定的路径段与其余独立路径照常保留，不会因环被丢弃。
+- 字段级结果中 `target` 与 `node` 为 `{"table", "column"}`，`edge` 的 `source` / `target` 同为字段对象。
+
+### 路径解释错误
+
+- 图结构与查询参数错误沿用既有异常：节点级为 `InvalidLineageInputError` / `InvalidLineageQueryError`，字段级为 `InvalidFieldLineageInputError` / `InvalidFieldLineageQueryError`（均为 `ValueError` 子类）。
+- `LineageNodeNotFoundError`（`ValueError` 子类，属性 `code = "LINEAGE_NODE_NOT_FOUND"`）：`target` 未在图中声明。此错误码为两个入口共用，节点级与字段级一致。
+
+校验顺序为图结构 → 查询参数 → target 声明性，与血缘追溯保持一致。
+
 ## 异常样本跨规则关联定位
 
 `correlate_violations` 把一批带稳定样本标识的校验结果与一张字段级血缘图合并，把同一样本上由同一字段或其血缘相邻字段触发的违规归入一个关联事件。
@@ -305,6 +367,36 @@ dq field-lineage < field-lineage.json
 - `INVALID_FIELD_LINEAGE_INPUT`：`fields`/`edges` 结构、端点或重复项有误。
 - `INVALID_FIELD_LINEAGE_QUERY`：`target`/`direction`/`max_depth` 非法。
 - `UNKNOWN_FIELD_LINEAGE_TARGET`：`target` 未在 `fields` 中声明。
+
+### dq lineage-paths
+
+从标准输入读取与 `dq lineage` 完全相同的 UTF-8 JSON 对象（`nodes`、`edges`、`target` 必填；`direction`、`max_depth` 可省略）：
+
+```bash
+dq lineage-paths < lineage.json
+```
+
+合法查询退出码为 0 并输出上述路径解释结果（含上游有序路径与下游影响范围）；目标存在但某方向无关系时仍为退出码 0、`paths` 为空数组。输入有误时退出码为 2，错误码依次为：
+
+- `INVALID_JSON`：输入不是合法 UTF-8 或无法解析为 JSON。
+- `INVALID_LINEAGE_INPUT`：`nodes`/`edges` 结构、端点或重复项有误。
+- `INVALID_LINEAGE_QUERY`：`target`/`direction`/`max_depth` 非法。
+- `LINEAGE_NODE_NOT_FOUND`：`target` 未在 `nodes` 中声明。
+
+### dq field-lineage-paths
+
+从标准输入读取与 `dq field-lineage` 完全相同的 UTF-8 JSON 对象（`fields`、`edges`、`target` 必填；`direction`、`max_depth` 可省略）：
+
+```bash
+dq field-lineage-paths < field-lineage.json
+```
+
+合法查询退出码为 0 并输出字段级路径解释结果；输入有误时退出码为 2，错误码依次为：
+
+- `INVALID_JSON`：输入不是合法 UTF-8 或无法解析为 JSON。
+- `INVALID_FIELD_LINEAGE_INPUT`：`fields`/`edges` 结构、端点或重复项有误。
+- `INVALID_FIELD_LINEAGE_QUERY`：`target`/`direction`/`max_depth` 非法。
+- `LINEAGE_NODE_NOT_FOUND`：`target` 未在 `fields` 中声明。
 
 ### dq correlate
 
