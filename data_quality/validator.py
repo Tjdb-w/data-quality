@@ -231,19 +231,55 @@ def _check_rule(
                 violations.append(_violation(rule, index, record, checked))
 
 
-def validate(records: Any, rules: Any) -> Dict[str, Any]:
-    """Validate ``records`` against ``rules``.
+def validate(
+    records: Any,
+    rules: Any,
+    *,
+    dataset: Any = None,
+    composite_rules: Any = None,
+    record_refs: Any = None,
+) -> Dict[str, Any]:
+    """Validate ``records`` against single-field ``rules``.
 
     Rules are fully validated before any record is examined. Rules are then
     evaluated in their given order; within a rule, records are checked in
     order.
 
+    Cross-field composite consistency rules may be supplied via
+    ``composite_rules`` (registered and evaluated record by record through
+    the public composite entry points). The single-field rules keep their
+    existing priority, result structure, sample content and error codes;
+    composite results are added separately under ``composite_results`` and
+    never alter ``passed`` / ``summary`` / ``violations``. When no
+    composite rules are supplied the response is byte-for-byte the
+    historical shape.
+
     :param records: list of JSON objects (plain ``dict`` instances).
     :param rules: list of rule objects with ``id``, ``type`` and ``options``.
-    :returns: ``{"passed": bool, "summary": {...}, "violations": [...]}``.
+    :param dataset: optional dataset identifier used by composite results.
+        Required (non-empty string) when ``composite_rules`` is supplied.
+    :param composite_rules: optional non-empty list of composite rule
+        definitions registered through
+        :func:`data_quality.composite.register_composite_rules`.
+    :param record_refs: optional record locators restricting composite
+        evaluation (see
+        :func:`data_quality.composite.evaluate_composite_rules`).
+    :returns: ``{"passed": bool, "summary": {...}, "violations": [...]}``
+        plus ``composite_results`` when composite rules are supplied.
     :raises ValueError: on malformed input or rule configuration.
     """
     compiled_rules = _validate_and_compile_rules(rules)
+
+    # Register every composite rule (all-or-nothing) before any record is
+    # examined or structurally validated, matching the single-field rule
+    # priority: a definition whose result cannot be determined aborts the
+    # whole validation run.
+    composite_rule_set = None
+    if composite_rules is not None:
+        # Imported lazily to avoid an import cycle between the modules.
+        from .composite import register_composite_rules
+
+        composite_rule_set = register_composite_rules(dataset, composite_rules)
 
     if not isinstance(records, list):
         raise InvalidInputError("records must be a list")
@@ -255,7 +291,7 @@ def validate(records: Any, rules: Any) -> Dict[str, Any]:
     for rule in compiled_rules:
         _check_rule(rule, records, violations)
 
-    return {
+    result: Dict[str, Any] = {
         "passed": not violations,
         "summary": {
             "record_count": len(records),
@@ -264,3 +300,13 @@ def validate(records: Any, rules: Any) -> Dict[str, Any]:
         },
         "violations": violations,
     }
+
+    if composite_rule_set is not None:
+        from .composite import evaluate_composite_rules
+
+        result["composite_rule_count"] = len(composite_rule_set["rules"])
+        result["composite_results"] = evaluate_composite_rules(
+            records, composite_rule_set, record_refs
+        )
+
+    return result
