@@ -5,6 +5,10 @@ from .correlation import (
     UnknownCorrelationReferenceError,
     correlate_violations,
 )
+from .field_impact import (
+    ImpactInputError,
+    analyze_field_impacts,
+)
 from .field_lineage import (
     InvalidFieldLineageInputError,
     InvalidFieldLineageQueryError,
@@ -36,9 +40,11 @@ __all__ = [
     "explain_lineage_paths",
     "explain_field_lineage_paths",
     "correlate_violations",
+    "analyze_field_impacts",
     "DataQualityError",
     "InvalidInputError",
     "InvalidRuleError",
+    "ImpactInputError",
     "InvalidLineageInputError",
     "InvalidLineageQueryError",
     "UnknownLineageTargetError",
@@ -50,4 +56,4 @@ __all__ = [
     "UnknownCorrelationReferenceError",
 ]
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"

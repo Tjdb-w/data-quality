@@ -13,6 +13,7 @@
 - 已实现：字段级上下游血缘追溯（`trace_field_lineage` 与命令行 `dq field-lineage`）。
 - 已实现：血缘路径解释与影响范围查询（`explain_lineage_paths` / `explain_field_lineage_paths` 与命令行 `dq lineage-paths` / `dq field-lineage-paths`）。
 - 已实现：异常样本跨规则关联定位（`correlate_violations` 与命令行 `dq correlate`）。
+- 已实现：字段级质量影响分析（`analyze_field_impacts`，Python API；命令行不变）。
 
 ## 安装
 
@@ -315,6 +316,76 @@ result = correlate_violations(results, lineage)
 - `UnknownCorrelationReferenceError`（`LookupError` 子类）：校验结果引用了未声明的数据集或字段。
 
 校验顺序为血缘图结构 → 校验结果结构（含重复冲突）→ 引用解析。
+
+## 字段级质量影响分析
+
+`analyze_field_impacts` 在既有规则校验、异常定位与字段血缘之上，从一批种子字段出发，分析每个种子沿有向血缘边可达的下游字段，以及落在这些下游字段上的非通过规则与可定位异常样本。
+
+```python
+from data_quality import analyze_field_impacts
+
+result = analyze_field_impacts(payload)
+```
+
+- `payload`：恰好包含五个键的 JSON 对象（键多余或缺失均抛错）：
+  - `datasets`：对象，键为非空数据集 id，值为字段名（非空字符串）数组。
+  - `lineageEdges`：有向边数组，每条恰好含 `sourceDataset`、`sourceField`、`targetDataset`、`targetField` 四个非空字符串键；方向由 source 指向 target。
+  - `validationResults`：规则数组，每条恰好含 `ruleId`（非空字符串）、`status`（`passed`、`failed`、`skipped` 之一）、`fields`（`{"dataset", "field"}` 引用数组）、`failedSampleIds`（非空字符串数组）。
+  - `anomalySamples`：按样本编号映射的对象，每个样本恰好含 `dataset`（非空字符串）与 `fieldValues`（字段名到任意 JSON 值的对象）。
+  - `seedFields`：`{"dataset", "field"}` 引用数组；字段全名为 `dataset.field`。
+- 种子沿有向边收集**至少经过一条边**可达的字段；自环以及回到种子的环也算可达，遇环正常结束；集合去重。
+- 未知种子（引用了未声明的数据集/字段）不报错，视作空下游。
+- 悬空边（任一端点未在 `datasets` 声明）不中断分析：遍历时跳过，并按 `(sourceDataset, sourceField, targetDataset, targetField)` 四键升序写入 `unresolvedReferences`。
+- 重复的种子、规则字段、样本编号与边均合法；图中允许自环与循环。
+
+### 影响分析返回结果
+
+```json
+{
+  "status": "ok",
+  "impacts": [
+    {
+      "seed": {"dataset": "ods", "field": "name"},
+      "downstreamFields": [
+        {"dataset": "ads", "field": "label"},
+        {"dataset": "dwd", "field": "label"}
+      ],
+      "affectedRules": ["r1"],
+      "anomalySamples": ["s1"],
+      "paths": [
+        [
+          {"dataset": "ods", "field": "name"},
+          {"dataset": "dwd", "field": "label"},
+          {"dataset": "ads", "field": "label"}
+        ],
+        [
+          {"dataset": "ods", "field": "name"},
+          {"dataset": "dwd", "field": "label"}
+        ]
+      ]
+    }
+  ],
+  "unresolvedReferences": []
+}
+```
+
+- 顶层 `status` 恒为 `"ok"`；`impacts` 严格按 `seedFields` 的原始顺序逐项对应（重复种子产生重复项）。
+- 每项含 `seed`、`downstreamFields`、`affectedRules`、`anomalySamples`、`paths`：
+  - `downstreamFields`：去重后的下游字段引用，按字段全名 `dataset.field` 升序。
+  - `affectedRules`：涉及任一下游字段且 `status` 非 `passed` 的规则 id，按 `ruleId` 升序。
+  - `anomalySamples`：上述受影响规则的 `failedSampleIds` 中、能在 `anomalySamples` 里定位到的样本编号，去重并按编号升序。
+  - `paths`：按下游字段全名升序，每项是种子到该字段的最短字段引用序列（含种子与目标）；等长时取字典序最小的序列。
+- `seedFields` 为空时返回空 `impacts`，但悬空边仍照常写入 `unresolvedReferences`。
+- 相同输入始终得到完全相同的结果；不修改输入，不产生部分返回。
+
+### 影响分析错误
+
+以下情况抛出 `ImpactInputError`（`ValueError` 子类，公开于 `data_quality`），不产生部分返回，也不新增其他业务错误：
+
+- `payload` 不是对象、缺少或多出顶层键。
+- `datasets`、`lineageEdges`、`validationResults`、`anomalySamples`、`seedFields` 或其中的字段/引用数组结构错误。
+- 任一标识（数据集、字段、规则、样本编号、种子引用）为空或不是字符串。
+- 规则 `status` 不属于 `passed`、`failed`、`skipped`。
 
 ## 命令行
 
