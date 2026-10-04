@@ -1,5 +1,18 @@
 """data_quality: standalone data quality rule validation and lineage tracing."""
 
+from .composite import (
+    CompositeRuleError,
+    InvalidRecordReferenceError,
+    PASSED,
+    FAILED,
+    SKIPPED_MISSING_FIELD,
+    SEVERITIES,
+    composite_impact_inputs,
+    composite_sample_id,
+    evaluate_composite_rules,
+    query_composite_results,
+    register_composite_rules,
+)
 from .correlation import (
     InvalidCorrelationInputError,
     UnknownCorrelationReferenceError,
@@ -41,9 +54,20 @@ __all__ = [
     "explain_field_lineage_paths",
     "correlate_violations",
     "analyze_field_impacts",
+    "register_composite_rules",
+    "evaluate_composite_rules",
+    "query_composite_results",
+    "composite_impact_inputs",
+    "composite_sample_id",
     "DataQualityError",
     "InvalidInputError",
     "InvalidRuleError",
+    "CompositeRuleError",
+    "InvalidRecordReferenceError",
+    "PASSED",
+    "FAILED",
+    "SKIPPED_MISSING_FIELD",
+    "SEVERITIES",
     "ImpactInputError",
     "InvalidLineageInputError",
     "InvalidLineageQueryError",
@@ -56,4 +80,4 @@ __all__ = [
     "UnknownCorrelationReferenceError",
 ]
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"

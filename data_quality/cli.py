@@ -1,11 +1,14 @@
 """Command line interface: ``dq validate``, ``dq lineage``,
 ``dq field-lineage``, ``dq lineage-paths``, ``dq field-lineage-paths``,
-``dq correlate``.
+``dq correlate``, ``dq composite-register``, ``dq composite-evaluate``,
+``dq composite-query``.
 
 All subcommands read a UTF-8 JSON object from standard input and write a
 UTF-8 JSON result to standard output.
 
-``dq validate`` reads ``{"records": [...], "rules": [...]}``.
+``dq validate`` reads ``{"records": [...], "rules": [...], "dataset": ...,
+"composite_rules": ...}`` where ``dataset`` and ``composite_rules`` are
+optional and must appear together.
 ``dq lineage`` reads ``{"nodes": [...], "edges": [...], "target": ...,
 "direction": ..., "max_depth": ...}`` where ``direction`` and ``max_depth``
 are optional.
@@ -17,6 +20,11 @@ the concrete upstream/downstream paths of the target.
 ``dq field-lineage-paths`` reads the same payload as ``dq field-lineage``
 and explains the concrete field-level upstream/downstream paths.
 ``dq correlate`` reads ``{"results": [...], "lineage": {...}}``.
+``dq composite-register`` reads ``{"dataset": {...}, "rules": [...]}``.
+``dq composite-evaluate`` reads ``{"records": [...], "compiled_rules": [...]}``
+or ``{"records": [...], "dataset": {...}, "rules": [...]}``.
+``dq composite-query`` reads ``{"results": [...], "filters": {...}}`` where
+``filters`` is optional.
 
 Error JSON has the shape ``{"error": {"code": ..., "message": ...}}`` and
 the process exits with status 2:
@@ -35,6 +43,15 @@ the process exits with status 2:
 * ``INVALID_CORRELATION_INPUT``       - correlate results/lineage are malformed
 * ``UNKNOWN_CORRELATION_REFERENCE``   - correlate result references an
                                         undeclared dataset or field
+* ``INVALID_RULE_SET``                - composite rules are not a non-empty list
+* ``DUPLICATE_RULE_ID``               - two composite rules share a rule_id
+* ``INVALID_SEVERITY``                - composite rule severity is unknown
+* ``UNSUPPORTED_COMPOSITE_CONDITION`` - composite condition type is unknown
+* ``INVALID_COMPOSITE_RULE``          - composite rule cannot be determined
+                                        (undeclared field, self reference,
+                                        bad date field/format, ...)
+* ``INVALID_RECORD_REFERENCE``        - composite records/results cannot be
+                                        located or are malformed
 """
 
 from __future__ import annotations
@@ -44,6 +61,13 @@ import json
 import sys
 from typing import Any, List, Optional
 
+from .composite import (
+    CompositeRuleError,
+    InvalidRecordReferenceError,
+    evaluate_composite_rules,
+    query_composite_results,
+    register_composite_rules,
+)
 from .correlation import (
     InvalidCorrelationInputError,
     UnknownCorrelationReferenceError,
@@ -122,8 +146,25 @@ def _run_validate() -> int:
     if "rules" not in payload:
         return _emit_error("INVALID_INPUT", "payload is missing 'rules'")
 
+    dataset = payload.get("dataset")
+    composite_rules = payload.get("composite_rules")
+    if (dataset is None) != (composite_rules is None):
+        return _emit_error(
+            "INVALID_COMPOSITE_RULE",
+            "'dataset' and 'composite_rules' must be provided together",
+        )
+
     try:
-        result = validate(payload["records"], payload["rules"])
+        result = validate(
+            payload["records"],
+            payload["rules"],
+            dataset=dataset,
+            composite_rules=composite_rules,
+        )
+    except CompositeRuleError as exc:
+        return _emit_error(exc.code, str(exc))
+    except InvalidRecordReferenceError as exc:
+        return _emit_error(exc.code, str(exc))
     except InvalidRuleError as exc:
         return _emit_error("INVALID_RULE", str(exc))
     except InvalidInputError as exc:
@@ -281,6 +322,98 @@ def _run_correlate() -> int:
     return EXIT_OK
 
 
+def _run_composite_register() -> int:
+    payload = _read_json_payload()
+    if payload is _PARSE_FAILED:
+        return EXIT_ERROR
+
+    if not isinstance(payload, dict):
+        return _emit_error(
+            "INVALID_RULE_SET", "input payload must be a JSON object"
+        )
+    if "dataset" not in payload:
+        return _emit_error(
+            "INVALID_COMPOSITE_RULE", "payload is missing 'dataset'"
+        )
+    if "rules" not in payload:
+        return _emit_error("INVALID_RULE_SET", "payload is missing 'rules'")
+
+    try:
+        compiled = register_composite_rules(payload["dataset"], payload["rules"])
+    except CompositeRuleError as exc:
+        return _emit_error(exc.code, str(exc))
+
+    json.dump({"compiled_rules": compiled}, sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+    return EXIT_OK
+
+
+def _run_composite_evaluate() -> int:
+    payload = _read_json_payload()
+    if payload is _PARSE_FAILED:
+        return EXIT_ERROR
+
+    if not isinstance(payload, dict):
+        return _emit_error(
+            "INVALID_RECORD_REFERENCE", "input payload must be a JSON object"
+        )
+    if "records" not in payload:
+        return _emit_error(
+            "INVALID_RECORD_REFERENCE", "payload is missing 'records'"
+        )
+
+    try:
+        if "compiled_rules" in payload:
+            result = evaluate_composite_rules(
+                payload["records"],
+                payload["compiled_rules"],
+                payload.get("dataset_id"),
+            )
+        elif "dataset" in payload and "rules" in payload:
+            compiled = register_composite_rules(payload["dataset"], payload["rules"])
+            result = evaluate_composite_rules(payload["records"], compiled)
+        else:
+            return _emit_error(
+                "INVALID_RECORD_REFERENCE",
+                "payload must contain 'compiled_rules' or both 'dataset' "
+                "and 'rules'",
+            )
+    except CompositeRuleError as exc:
+        return _emit_error(exc.code, str(exc))
+    except InvalidRecordReferenceError as exc:
+        return _emit_error(exc.code, str(exc))
+
+    json.dump(result, sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+    return EXIT_OK
+
+
+def _run_composite_query() -> int:
+    payload = _read_json_payload()
+    if payload is _PARSE_FAILED:
+        return EXIT_ERROR
+
+    if not isinstance(payload, dict):
+        return _emit_error(
+            "INVALID_RECORD_REFERENCE", "input payload must be a JSON object"
+        )
+    if "results" not in payload:
+        return _emit_error(
+            "INVALID_RECORD_REFERENCE", "payload is missing 'results'"
+        )
+
+    try:
+        selected = query_composite_results(
+            payload["results"], payload.get("filters")
+        )
+    except InvalidRecordReferenceError as exc:
+        return _emit_error(exc.code, str(exc))
+
+    json.dump({"results": selected}, sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+    return EXIT_OK
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="dq",
@@ -328,6 +461,27 @@ def build_parser() -> argparse.ArgumentParser:
         "from a UTF-8 JSON object on standard input",
     )
     correlate_parser.set_defaults(handler=_run_correlate)
+
+    composite_register_parser = subparsers.add_parser(
+        "composite-register",
+        help="register cross-field consistency rules from a UTF-8 JSON "
+        "object on standard input",
+    )
+    composite_register_parser.set_defaults(handler=_run_composite_register)
+
+    composite_evaluate_parser = subparsers.add_parser(
+        "composite-evaluate",
+        help="evaluate registered cross-field rules record by record from "
+        "a UTF-8 JSON object on standard input",
+    )
+    composite_evaluate_parser.set_defaults(handler=_run_composite_evaluate)
+
+    composite_query_parser = subparsers.add_parser(
+        "composite-query",
+        help="filter composite evaluation results from a UTF-8 JSON object "
+        "on standard input",
+    )
+    composite_query_parser.set_defaults(handler=_run_composite_query)
     return parser
 
 

@@ -14,6 +14,7 @@
 - 已实现：血缘路径解释与影响范围查询（`explain_lineage_paths` / `explain_field_lineage_paths` 与命令行 `dq lineage-paths` / `dq field-lineage-paths`）。
 - 已实现：异常样本跨规则关联定位（`correlate_violations` 与命令行 `dq correlate`）。
 - 已实现：字段级质量影响分析（`analyze_field_impacts`，Python API；命令行不变）。
+- 已实现：跨字段一致性规则（`register_composite_rules` / `evaluate_composite_rules` / `query_composite_results`，命令行 `dq composite-register` / `composite-evaluate` / `composite-query`；`dq validate` 支持一次校验同时运行单字段与跨字段规则）。
 
 ## 安装
 
@@ -86,6 +87,128 @@ JSON 相等为结构化比较：对象忽略键顺序、数组按顺序逐项比
 
 - `InvalidInputError`：`records` 不是列表，或其中元素不是 JSON 对象。
 - `InvalidRuleError`：规则结构错误、未知类型、`id` 为空或重复、`options` 不匹配、`min > max`、`pattern` 不是合法正则等。
+
+### 一次校验同时运行跨字段规则
+
+`validate` 增加两个可选关键字参数 `dataset` 与 `composite_rules`（必须同时出现）：
+
+```python
+result = validate(records, rules, dataset=dataset, composite_rules=composite_rules)
+```
+
+- 单字段规则的 `passed` / `summary` / `violations` 与不提供跨字段规则时**完全一致**，跨字段结果只附加在新键 `composite` 下。
+- 全部规则（单字段与跨字段）先统一注册：跨字段规则被拒绝时整次校验失败，不执行任何记录，也不会部分注册。
+
+## 跨字段一致性规则
+
+跨字段规则判断同一记录内多个字段是否共同满足约束，与单字段规则共享"注册 → 执行 → 结果查询"的使用方式。
+
+```python
+from data_quality import (
+    register_composite_rules,
+    evaluate_composite_rules,
+    query_composite_results,
+)
+
+compiled = register_composite_rules(dataset, composite_rules)
+output = evaluate_composite_rules(records, compiled)
+selected = query_composite_results(output, {"rule_id": "dates",
+                                            "severity": "error"})
+```
+
+### 规则注册
+
+- `dataset`：`{"dataset_id": 非空字符串, "fields": ...}`。`fields` 可以是字段名（非空字符串）列表，也可以是字段名到类型字符串的映射（类型为 `date` / `datetime` 的字段才允许参与日期先后比较）；字段顺序被保留。
+- 规则为非空列表，每条恰好含四个键：
+  - `rule_id`：非空字符串，批次内唯一、稳定，不出现在结果之外的任何重命名中。
+  - `fields`：非空、互不重复的目标字段集合，必须已在数据集声明，且**恰好**是其条件引用的全部字段。
+  - `severity`：严重级别，只能是 `error`、`warning`、`info`。
+  - `conditions`：非空关联条件列表，多条件按**与（AND）**组合。
+- 关联条件至少覆盖四类：
+
+| 条件 type | 字段 | 含义 |
+| --- | --- | --- |
+| `field_equals` | `left`、`right` | 两个字段按 JSON 相等必须相等 |
+| `field_not_equals` | `left`、`right` | 两个字段必须不相等 |
+| `date_order` | `left`、`right`、可选 `format` | `left` 日期必须不晚于 `right`（相等合法） |
+| `required_if` | `when`、`field` | `when` 存在且非 `null` 时，`field` 必须存在且非 `null` |
+
+- 比较类条件的 `left`/`right` 必须是两个不同的已声明字段（禁止引用自身）；`required_if` 的 `when` 与 `field` 也不得相同。
+- `date_order` 默认按 ISO `YYYY-MM-DD` 或 ISO 8601 日期时间比较；提供 `format` 时按 strptime 解析（如 `"%d/%m/%Y"`）。日期字段类型不是 `date`/`datetime`、或格式含无法识别的指令（如 `%Q`、悬空 `%`）都在注册阶段拒绝。
+- 注册是原子的：任一规则无法确定执行结果时整批拒绝，不部分注册。
+
+### 执行
+
+`evaluate_composite_rules(records, compiled)` 按注册顺序逐条规则、再按记录顺序评估，每条规则对每条记录产生**一条完整结果**：
+
+- `PASSED`：关联字段齐全且全部条件成立；
+- `FAILED`：关联字段齐全但条件不全成立（含日期值无法解析，坏数据不会被静默放过）；
+- `SKIPPED_MISSING_FIELD`：记录缺少该规则引用的任一字段。既不算通过也不算失败，不阻断其他规则继续执行。
+
+同一记录违反多条规则时保留全部结果，按规则注册顺序、记录顺序稳定输出。
+
+完整结果含数据集标识、记录定位信息、规则与关联字段、结论、严重级别和可供下游查询的上下文：
+
+```json
+{
+  "dataset_id": "ds",
+  "results": [
+    {
+      "dataset_id": "ds",
+      "record_index": 1,
+      "record_id": "s2",
+      "rule_id": "dates",
+      "fields": ["start", "end"],
+      "conclusion": "FAILED",
+      "severity": "error",
+      "context": {
+        "conditions": [
+          {"type": "date_order", "fields": ["start", "end"], "satisfied": false}
+        ],
+        "missing_fields": [],
+        "values": {"start": "2024-05-01", "end": "2024-01-01"}
+      }
+    }
+  ],
+  "summary": {
+    "dataset_id": "ds",
+    "record_count": 2,
+    "rule_count": 1,
+    "passed_count": 1,
+    "failed_count": 1,
+    "skipped_count": 0
+  }
+}
+```
+
+- `record_id` 取记录的 `id` 字段，缺失时为 `null`；`record_index` 从 0 开始。跳过结果的 `context.missing_fields` 列出缺失字段、`values` 为 `null`。
+
+### 结果查询
+
+`query_composite_results(results, filters)` 在不改变既有单字段规则历史查询口径的前提下筛选跨字段结果：
+
+- 可按 `rule_id`（字符串或字符串列表）、`severity`（同上）、记录定位 `record_index`（非负整数）或 `record_id`（字符串）筛选；条件之间为与。
+- 筛选只做子集过滤，继续遵守注册顺序/记录顺序的稳定输出。
+- `results` 可传执行返回的整个字典，也可传裸结果列表。
+
+### 异常样本定位与血缘沿用
+
+`composite_impact_inputs(results)` 把 FAILED 结果适配为 `analyze_field_impacts` 直接消费的 `validationResults` 与 `anomalySamples` 片段：
+
+- 每条失败规则成为一个 `status: "failed"`、`fields` 为全部参与字段（`{"dataset", "field"}`）的规则项；每条失败记录成为一个异常样本，样本编号就是记录定位（有 `id` 用 `id`，否则为 `record:<index>`，另有 `composite_sample_id` 辅助函数）。
+- 因此从一条跨字段异常跳回时，看到的记录与参与字段和校验结果完全一致；把这些片段并入既有影响分析载荷后，如果参与字段已是血缘节点，现有的上下游追溯语义（下游字段、受影响规则、异常样本、路径）原样适用，无需改动任何血缘入口。
+
+### 跨字段规则错误
+
+注册阶段抛出 `CompositeRuleError`（`ValueError` 子类，含可定位的 `rule_id` 与 `field` 属性），错误码：
+
+- `INVALID_RULE_SET`：规则集为空或不是列表。
+- `DUPLICATE_RULE_ID`：`rule_id` 重复。
+- `INVALID_SEVERITY`：严重级别未知。
+- `UNSUPPORTED_COMPOSITE_CONDITION`：出现不支持的关联条件类型。
+- `INVALID_COMPOSITE_RULE`：其他无法确定执行结果的定义——字段不存在、条件引用自身、目标字段与条件引用字段不一致、日期字段类型/格式不合法等；错误对象带 `rule_id` 与可定位的 `field`。
+
+执行/查询阶段抛出 `InvalidRecordReferenceError`（`LookupError` 子类，错误码 `INVALID_RECORD_REFERENCE`）：记录不是 JSON 对象列表、无法定位记录、编译规则与数据集不匹配，或查询筛选参数非法。
 
 ## 血缘追溯
 
@@ -397,6 +520,8 @@ result = analyze_field_impacts(payload)
 dq validate < payload.json
 ```
 
+载荷可选地同时包含 `dataset` 与 `composite_rules`，使一次校验同时运行单字段与跨字段规则；单字段结果结构不变，跨字段结果附加在 `composite` 键下。两者必须同时出现。
+
 成功（无论是否有违反）退出码为 0；输入有误时退出码为 2，并向标准输出写入：
 
 ```json
@@ -408,6 +533,23 @@ dq validate < payload.json
 - `INVALID_JSON`：输入不是合法 UTF-8 或无法解析为 JSON。
 - `INVALID_INPUT`：载荷不是 JSON 对象、缺少 `records`/`rules`、或 `records` 结构错误。
 - `INVALID_RULE`：规则定义非法（未知类型、重复 id、选项冲突、非法正则等）。
+- `INVALID_RULE_SET` / `DUPLICATE_RULE_ID` / `INVALID_SEVERITY` / `UNSUPPORTED_COMPOSITE_CONDITION` / `INVALID_COMPOSITE_RULE`：载荷含 `composite_rules` 时的跨字段规则注册错误（见上文）。
+- `INVALID_RECORD_REFERENCE`：跨字段执行无法定位记录。
+
+### dq composite-register / composite-evaluate / composite-query
+
+三个子命令分别对应跨字段规则的注册、执行与结果查询，均从标准输入读取 UTF-8 JSON：
+
+```bash
+dq composite-register  < register.json   # {"dataset": ..., "rules": [...]} -> {"compiled_rules": [...]}
+dq composite-evaluate  < evaluate.json   # {"records": [...], "compiled_rules": [...]}
+dq composite-query     < query.json      # {"results": ..., "filters": {...}}
+```
+
+- `composite-evaluate` 也接受 `{"records": [...], "dataset": ..., "rules": [...]}`，在单次调用内先注册再执行；可选 `dataset_id` 用于校验记录所属数据集与规则注册数据集一致。
+- `composite-query` 的 `filters` 可省略，支持 `rule_id`、`severity`（字符串或字符串数组）、`record_index`、`record_id`，输出 `{"results": [...]}` 且保持稳定顺序。
+
+合法输入退出码为 0；输入有误时退出码为 2，错误码为 `INVALID_JSON`、`INVALID_RULE_SET`、`DUPLICATE_RULE_ID`、`INVALID_SEVERITY`、`UNSUPPORTED_COMPOSITE_CONDITION`、`INVALID_COMPOSITE_RULE` 或 `INVALID_RECORD_REFERENCE`，错误体同样为 `{"error": {"code", "message"}}`。
 
 ### dq lineage
 

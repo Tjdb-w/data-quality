@@ -11,7 +11,13 @@ problems raise :class:`InvalidRuleError`; both subclass :class:`ValueError`.
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
+
+from .composite import (
+    CompositeRuleError,
+    evaluate_composite_rules,
+    register_composite_rules,
+)
 
 __all__ = [
     "validate",
@@ -231,19 +237,49 @@ def _check_rule(
                 violations.append(_violation(rule, index, record, checked))
 
 
-def validate(records: Any, rules: Any) -> Dict[str, Any]:
+def validate(
+    records: Any,
+    rules: Any,
+    dataset: Any = None,
+    composite_rules: Any = None,
+) -> Dict[str, Any]:
     """Validate ``records`` against ``rules``.
 
     Rules are fully validated before any record is examined. Rules are then
     evaluated in their given order; within a rule, records are checked in
     order.
 
+    When ``composite_rules`` is given, cross-field consistency rules are
+    registered and evaluated in the same run: every rule (single-field and
+    composite) is fully registered first -- a rejected composite rule
+    aborts the whole run, nothing is partially registered -- and only then
+    are the records read. Single-field results are returned unchanged;
+    composite results are added under the ``composite`` key and never
+    alter ``passed``, ``summary`` or ``violations``.
+
     :param records: list of JSON objects (plain ``dict`` instances).
     :param rules: list of rule objects with ``id``, ``type`` and ``options``.
-    :returns: ``{"passed": bool, "summary": {...}, "violations": [...]}``.
+    :param dataset: dataset descriptor ``{"dataset_id", "fields"}`` the
+        composite rules are registered against. Required together with
+        ``composite_rules``.
+    :param composite_rules: optional non-empty list of composite rule
+        definitions (see :func:`data_quality.register_composite_rules`).
+    :returns: ``{"passed": bool, "summary": {...}, "violations": [...],
+        "composite": {...}}`` (the ``composite`` key is present only when
+        composite rules were supplied).
     :raises ValueError: on malformed input or rule configuration.
     """
     compiled_rules = _validate_and_compile_rules(rules)
+
+    compiled_composite: Optional[List[Dict[str, Any]]] = None
+    if composite_rules is not None:
+        if dataset is None:
+            raise CompositeRuleError(
+                "a dataset descriptor is required to register composite "
+                "rules",
+                code="INVALID_COMPOSITE_RULE",
+            )
+        compiled_composite = register_composite_rules(dataset, composite_rules)
 
     if not isinstance(records, list):
         raise InvalidInputError("records must be a list")
@@ -255,7 +291,7 @@ def validate(records: Any, rules: Any) -> Dict[str, Any]:
     for rule in compiled_rules:
         _check_rule(rule, records, violations)
 
-    return {
+    result: Dict[str, Any] = {
         "passed": not violations,
         "summary": {
             "record_count": len(records),
@@ -264,3 +300,8 @@ def validate(records: Any, rules: Any) -> Dict[str, Any]:
         },
         "violations": violations,
     }
+    if compiled_composite is not None:
+        result["composite"] = evaluate_composite_rules(
+            records, compiled_composite
+        )
+    return result
