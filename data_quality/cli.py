@@ -1,5 +1,5 @@
 """Command line interface: ``dq validate``, ``dq lineage``,
-``dq field-lineage``, ``dq correlate``.
+``dq field-lineage``, ``dq correlate``, ``dq lineage-paths``.
 
 All subcommands read a UTF-8 JSON object from standard input and write a
 UTF-8 JSON result to standard output.
@@ -12,6 +12,9 @@ are optional.
 "direction": ..., "max_depth": ...}`` where ``direction`` and ``max_depth``
 are optional.
 ``dq correlate`` reads ``{"results": [...], "lineage": {...}}``.
+``dq lineage-paths`` reads ``{"tables": [...], "processes": [...],
+"fields": {...}, "edges": [...], "target": ..., "direction": ...}`` where
+``direction`` is optional.
 
 Error JSON has the shape ``{"error": {"code": ..., "message": ...}}`` and
 the process exits with status 2:
@@ -29,6 +32,12 @@ the process exits with status 2:
 * ``INVALID_CORRELATION_INPUT``       - correlate results/lineage are malformed
 * ``UNKNOWN_CORRELATION_REFERENCE``   - correlate result references an
                                         undeclared dataset or field
+* ``INVALID_LINEAGE_PATH_INPUT``      - lineage-paths graph is missing/malformed
+* ``INVALID_LINEAGE_PATH_QUERY``      - lineage-paths target/direction is bad
+
+``dq lineage-paths`` additionally reports an undeclared target as the error
+result ``{"success": false, "code": "LINEAGE_NODE_NOT_FOUND", ...}`` with
+exit status 2.
 """
 
 from __future__ import annotations
@@ -54,6 +63,11 @@ from .lineage import (
     InvalidLineageQueryError,
     UnknownLineageTargetError,
     trace_lineage,
+)
+from .lineage_paths import (
+    InvalidLineagePathInputError,
+    InvalidLineagePathQueryError,
+    explain_lineage_paths,
 )
 from .validator import (
     DataQualityError,
@@ -210,6 +224,41 @@ def _run_correlate() -> int:
     return EXIT_OK
 
 
+def _run_lineage_paths() -> int:
+    payload = _read_json_payload()
+    if payload is _PARSE_FAILED:
+        return EXIT_ERROR
+
+    if not isinstance(payload, dict):
+        return _emit_error(
+            "INVALID_LINEAGE_PATH_INPUT", "input payload must be a JSON object"
+        )
+
+    graph = {
+        "tables": payload.get("tables"),
+        "processes": payload.get("processes"),
+        "fields": payload.get("fields"),
+        "edges": payload.get("edges"),
+    }
+    try:
+        result = explain_lineage_paths(
+            graph,
+            payload.get("target"),
+            payload.get("direction", "both"),
+        )
+    except InvalidLineagePathInputError as exc:
+        return _emit_error("INVALID_LINEAGE_PATH_INPUT", str(exc))
+    except InvalidLineagePathQueryError as exc:
+        return _emit_error("INVALID_LINEAGE_PATH_QUERY", str(exc))
+
+    json.dump(result, sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+    if not result["success"]:
+        # LINEAGE_NODE_NOT_FOUND is an error result, not an exception.
+        return EXIT_ERROR
+    return EXIT_OK
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="dq",
@@ -243,6 +292,13 @@ def build_parser() -> argparse.ArgumentParser:
         "from a UTF-8 JSON object on standard input",
     )
     correlate_parser.set_defaults(handler=_run_correlate)
+
+    lineage_paths_parser = subparsers.add_parser(
+        "lineage-paths",
+        help="explain upstream source paths and the downstream impact "
+        "scope from a UTF-8 JSON object on standard input",
+    )
+    lineage_paths_parser.set_defaults(handler=_run_lineage_paths)
     return parser
 
 

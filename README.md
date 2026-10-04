@@ -12,6 +12,8 @@
 - 已实现：上下游血缘追溯（`trace_lineage` 与命令行 `dq lineage`）。
 - 已实现：字段级上下游血缘追溯（`trace_field_lineage` 与命令行 `dq field-lineage`）。
 - 已实现：异常样本跨规则关联定位（`correlate_violations` 与命令行 `dq correlate`）。
+- 已实现：血缘路径解释与影响范围查询（`explain_lineage_paths` 与命令行 `dq lineage-paths`）。
+- 已实现：血缘路径解释与影响范围查询（`explain_lineage_paths` 与命令行 `dq lineage-paths`）。
 
 ## 安装
 
@@ -254,6 +256,77 @@ result = correlate_violations(results, lineage)
 
 校验顺序为血缘图结构 → 校验结果结构（含重复冲突）→ 引用解析。
 
+## 血缘路径解释与影响范围查询
+
+`explain_lineage_paths` 在一张同时包含表级节点、字段级节点与处理节点的血缘图上，从一个目标节点出发枚举完整路径：查上游时给出从直接父节点回溯到来源节点的有序路径，查下游时给出传播到直接与间接依赖对象的影响范围。
+
+```python
+from data_quality import explain_lineage_paths
+
+result = explain_lineage_paths(graph, target, direction="both")
+```
+
+- `graph`：恰好包含四个键的血缘图对象：
+  - `tables`：互不重复的非空表 id 列表（表级节点）。
+  - `processes`：互不重复的非空处理节点 id 列表。
+  - `fields`：对象，键为已声明的表 id，值为互不重复的非空字段 id 列表（字段级节点）。
+  - `edges`：恰好含 `source`、`target`、`type` 三键的对象列表；两端为节点引用（`{"table": ...}` 表级、`{"table": ..., "field": ...}` 字段级或 `{"process": ...}` 处理节点）且必须已声明；`type` 为非空字符串；重复的 `(source, target)` 边报错；自环与环路合法。
+- `target`：查询起点，同为上述三种节点引用之一，兼容表级与字段级节点。
+- `direction`：`upstream`（回溯来源）、`downstream`（影响范围）或 `both`（默认，两侧都查）。
+
+### 路径查询返回结果
+
+```json
+{
+  "success": true,
+  "target": {"table": "dwd"},
+  "direction": "both",
+  "paths": [
+    {
+      "direction": "upstream",
+      "depth": 2,
+      "cycle": false,
+      "steps": [
+        {
+          "position": 0,
+          "node": {"id": "table:dwd", "type": "table", "table": "dwd", "field": null},
+          "edge": null
+        },
+        {
+          "position": 1,
+          "node": {"id": "table:ods", "type": "table", "table": "ods", "field": null},
+          "edge": {"id": "table:ods->table:dwd", "type": "load",
+                   "source": "table:ods", "target": "table:dwd"}
+        }
+      ],
+      "cycle_nodes": [],
+      "cycle_edge": null
+    }
+  ]
+}
+```
+
+- 每个 `steps` 条目含路径中的先后位置 `position`（起点为 0）、节点（稳定标识 `id`、节点类型 `type`、可展示的 `table` / `field` 名，不适用时为 `null`）以及造成该步关系的直接边 `edge`（起点为 `null`；边含稳定标识 `id`、边类型 `type` 与按声明方向给出的 `source` / `target`）。
+- 节点稳定标识形如 `table:ods`、`field:ods.name`、`process:etl`；边稳定标识为 `<source>-><target>`。
+- 一个目标可对应多条路径；同一节点可出现在不同路径中。路径按方向（upstream 在前）、路径深度、节点稳定标识、边稳定标识排序，相同输入重复查询结果完全一致。
+- 单条路径内不通过环无限延伸：发现环时该路径 `cycle` 为 `true`，`steps` 保留已确定的路径段，`cycle_nodes` 为环上节点，`cycle_edge` 为闭合环的那条直接边；其余独立路径不受影响，照常返回。
+- 目标存在但对应方向没有任何关系时返回 `success` 为 `true`、`paths` 为空数组的正常结果，不视为异常。
+- 结果只保存在内存中；不写文件、不访问外部服务，输入的图不会被改写。
+
+### 路径查询错误
+
+- 目标未在图中声明时不抛异常，统一返回错误结果（查询任一方向、任一级别的目标均相同）：
+
+```json
+{"success": false, "code": "LINEAGE_NODE_NOT_FOUND", "message": "...", "target": {"table": "ghost"}}
+```
+
+- 以下情况抛出 `ValueError` 子类（均公开于 `data_quality`）：
+  - `InvalidLineagePathInputError`：`graph` 结构有误、标识为空或重复、`fields` 引用了未声明的表、边含多余/缺失键、边类型为空、端点未声明、边重复。
+  - `InvalidLineagePathQueryError`：`target` 不是合法的节点引用、`direction` 不在三者之内。
+
+校验顺序为图结构 → 查询参数 → target 声明性（声明性以错误结果返回）。
+
 ## 命令行
 
 ### dq validate
@@ -319,6 +392,21 @@ dq correlate < correlate.json
 - `INVALID_JSON`：输入不是合法 UTF-8 或无法解析为 JSON。
 - `INVALID_CORRELATION_INPUT`：`results`/`lineage` 结构、标识、重复记录或边有误。
 - `UNKNOWN_CORRELATION_REFERENCE`：校验结果引用了未声明的数据集或字段。
+
+### dq lineage-paths
+
+从标准输入读取血缘路径查询的 UTF-8 JSON 对象（`tables`、`processes`、`fields`、`edges`、`target` 必填；`direction` 可省略，默认 `both`）：
+
+```bash
+dq lineage-paths < lineage-paths.json
+```
+
+合法查询退出码为 0 并输出上述路径解释结果（含 `success: true` 与空 `paths` 的情况）；输入有误或目标未声明时退出码为 2，错误码依次为：
+
+- `INVALID_JSON`：输入不是合法 UTF-8 或无法解析为 JSON。
+- `INVALID_LINEAGE_PATH_INPUT`：`tables`/`processes`/`fields`/`edges` 结构、标识或边有误。
+- `INVALID_LINEAGE_PATH_QUERY`：`target`/`direction` 非法。
+- `LINEAGE_NODE_NOT_FOUND`：`target` 未在图中声明；此时输出错误结果 `{"success": false, "code": "LINEAGE_NODE_NOT_FOUND", "message": ..., "target": ...}` 而非 `{"error": ...}` 包装。
 
 除标准输入与标准输出外，不写文件、不访问外部服务。
 
