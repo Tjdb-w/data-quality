@@ -1,6 +1,6 @@
 """Command line interface: ``dq validate``, ``dq lineage``,
 ``dq field-lineage``, ``dq lineage-paths``, ``dq field-lineage-paths``,
-``dq correlate``, ``dq query-results``.
+``dq correlate``, ``dq correlate-links``, ``dq query-results``.
 
 All subcommands read a UTF-8 JSON object from standard input and write a
 UTF-8 JSON result to standard output.
@@ -23,6 +23,8 @@ the concrete upstream/downstream paths of the target.
 ``dq field-lineage-paths`` reads the same payload as ``dq field-lineage``
 and explains the concrete field-level upstream/downstream paths.
 ``dq correlate`` reads ``{"results": [...], "lineage": {...}}``.
+``dq correlate-links`` reads ``{"results": [...], "lineage": {...},
+"sample_links": [...]}``.
 
 Error JSON has the shape ``{"error": {"code": ..., "message": ...}}`` and
 the process exits with status 2:
@@ -49,6 +51,10 @@ the process exits with status 2:
 * ``INVALID_CORRELATION_INPUT``       - correlate results/lineage are malformed
 * ``UNKNOWN_CORRELATION_REFERENCE``   - correlate result references an
                                         undeclared dataset or field
+* ``INVALID_LINKED_CORRELATION_INPUT`` - correlate-links sample_links are
+                                         malformed
+* ``UNKNOWN_LINKED_CORRELATION_REFERENCE`` - correlate-links sample link
+                                            endpoint has no matching result
 """
 
 from __future__ import annotations
@@ -61,7 +67,10 @@ from typing import Any, List, Optional
 from .composite import query_composite_results
 from .correlation import (
     InvalidCorrelationInputError,
+    InvalidLinkedCorrelationInputError,
     UnknownCorrelationReferenceError,
+    UnknownLinkedCorrelationReferenceError,
+    correlate_linked_violations,
     correlate_violations,
 )
 from .field_lineage import (
@@ -332,6 +341,37 @@ def _run_correlate() -> int:
     return EXIT_OK
 
 
+def _run_correlate_links() -> int:
+    payload = _read_json_payload()
+    if payload is _PARSE_FAILED:
+        return EXIT_ERROR
+
+    if not isinstance(payload, dict):
+        return _emit_error(
+            "INVALID_LINKED_CORRELATION_INPUT",
+            "input payload must be a JSON object",
+        )
+
+    try:
+        result = correlate_linked_violations(
+            payload.get("results"),
+            payload.get("lineage"),
+            payload.get("sample_links"),
+        )
+    except InvalidCorrelationInputError as exc:
+        return _emit_error("INVALID_CORRELATION_INPUT", str(exc))
+    except UnknownCorrelationReferenceError as exc:
+        return _emit_error("UNKNOWN_CORRELATION_REFERENCE", str(exc))
+    except InvalidLinkedCorrelationInputError as exc:
+        return _emit_error("INVALID_LINKED_CORRELATION_INPUT", str(exc))
+    except UnknownLinkedCorrelationReferenceError as exc:
+        return _emit_error("UNKNOWN_LINKED_CORRELATION_REFERENCE", str(exc))
+
+    json.dump(result, sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+    return EXIT_OK
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="dq",
@@ -379,6 +419,14 @@ def build_parser() -> argparse.ArgumentParser:
         "from a UTF-8 JSON object on standard input",
     )
     correlate_parser.set_defaults(handler=_run_correlate)
+
+    correlate_links_parser = subparsers.add_parser(
+        "correlate-links",
+        help="group violation results across linked samples into "
+        "cross-dataset correlation events from a UTF-8 JSON object on "
+        "standard input",
+    )
+    correlate_links_parser.set_defaults(handler=_run_correlate_links)
 
     query_results_parser = subparsers.add_parser(
         "query-results",

@@ -13,6 +13,7 @@
 - 已实现：字段级上下游血缘追溯（`trace_field_lineage` 与命令行 `dq field-lineage`）。
 - 已实现：血缘路径解释与影响范围查询（`explain_lineage_paths` / `explain_field_lineage_paths` 与命令行 `dq lineage-paths` / `dq field-lineage-paths`）。
 - 已实现：异常样本跨规则关联定位（`correlate_violations` 与命令行 `dq correlate`）。
+- 已实现：跨数据集关联样本的异常关联定位（`correlate_linked_violations` 与命令行 `dq correlate-links`）。
 - 已实现：字段级质量影响分析（`analyze_field_impacts`，Python API；命令行不变）。
 - 已实现：跨字段一致性规则（`register_composite_rules` / `evaluate_composite_rules` / `query_composite_results`，并经 `validate` 与命令行 `dq validate` / `dq query-results` 使用）。
 
@@ -436,6 +437,68 @@ result = correlate_violations(results, lineage)
 
 校验顺序为血缘图结构 → 校验结果结构（含重复冲突）→ 引用解析。
 
+## 跨数据集关联样本的异常关联定位
+
+`correlate_linked_violations` 是 `correlate_violations` 的跨数据集版本：`results`、`lineage` 的结构、校验与字段分组语义完全沿用前者，额外接收一份无向的 `sample_links`，把不同数据集（或同数据集）中对应的样本关联起来。
+
+```python
+from data_quality import correlate_linked_violations
+
+result = correlate_linked_violations(results, lineage, sample_links)
+```
+
+- `results` / `lineage`：与 `correlate_violations` 完全相同，校验规则、异常与错误码不变。
+- `sample_links`：关联关系对象列表，每条恰好含 `left`、`right` 两个键；两端均为恰好含 `dataset_id`、`sample_id` 两个非空字符串键的对象。
+  - 关系**无向**：`{left: A, right: B}` 与 `{left: B, right: A}` 是同一条关系。
+  - 端点只含样本定位，**不含 value、也不比较 value**：仅按 `dataset_id` + `sample_id` 与 `results` 中的样本匹配。
+  - 每个端点都必须能在 `results` 中找到相同 `dataset_id` 与 `sample_id` 的结果（该结果是否违规均可）。
+
+### 关联与分组
+
+- 以每条结果的 `dataset_id` 与 `sample_id` 构造样本引用 `{"dataset_id", "sample_id"}`，沿无向 `sample_links` 求**传递闭包**：每个连通分量是一个样本关联组。
+- 仅 `violated=true` 的结果参与事件；同一关联组内，违规字段继续按字段血缘的**相邻语义**分组（一条有效血缘边相连才合并，仅同数据集但无血缘边不合并）。
+- 全为通过结果的关联组（含仅由通过样本桥接的分量）不产生事件；无任何违规时返回 `{"events": []}`。
+
+### 返回结果
+
+```json
+{
+  "events": [
+    {
+      "sample_refs": [
+        {"dataset_id": "dwd", "sample_id": "样本-1"},
+        {"dataset_id": "ods", "sample_id": "样本-a"}
+      ],
+      "rules": ["r1", "r2"],
+      "fields": [
+        {"dataset": "dwd", "field": "label"},
+        {"dataset": "ods", "field": "name"}
+      ],
+      "upstream_fields": [],
+      "downstream_fields": [{"dataset": "ads", "field": "label"}]
+    }
+  ]
+}
+```
+
+事件恰好含五个键，顺序固定：
+
+- `sample_refs`：事件内去重后的样本引用，按 `(dataset_id, sample_id)` 排序。
+- `rules`：去重后的违规规则 id，按 id 升序。
+- `fields`：去重后的受影响字段引用 `{"dataset", "field"}`，按 `(dataset, field)` 排序。
+- `upstream_fields` / `downstream_fields`：受影响字段在血缘图中分量外的直接上游 / 直接下游字段（不含事件字段本身），去重并按 `(dataset, field)` 排序。
+- 事件整体按 `(sample_refs 序列, fields 序列)` 排序；相同输入始终得到完全相同的结果，不修改输入。
+
+### 错误
+
+以下情况抛出异常（均公开于 `data_quality`），且**不返回部分结果**：
+
+- `InvalidLinkedCorrelationInputError`（`ValueError` 子类，码 `INVALID_LINKED_CORRELATION_INPUT`）：`sample_links` 不是列表、链接或端点含缺失/多余键、标识为空、自链接（两端为同一样本）、重复关系（含左右反转的重复）。
+- `UnknownLinkedCorrelationReferenceError`（`LookupError` 子类，码 `UNKNOWN_LINKED_CORRELATION_REFERENCE`）：链接端点在 `results` 中找不到相同 `dataset_id` + `sample_id` 的结果。
+- `results` / `lineage` 仍抛出原有的 `InvalidCorrelationInputError` / `UnknownCorrelationReferenceError`。
+
+校验顺序为血缘图结构 → 结果结构（含重复冲突）→ 结果引用解析 → sample_links 结构（含自链接/重复）→ 链接端点引用解析；结构错误先于未知引用错误。
+
 ## 字段级质量影响分析
 
 `analyze_field_impacts` 在既有规则校验、异常定位与字段血缘之上，从一批种子字段出发，分析每个种子沿有向血缘边可达的下游字段，以及落在这些下游字段上的非通过规则与可定位异常样本。
@@ -631,6 +694,47 @@ dq correlate < correlate.json
 - `INVALID_JSON`：输入不是合法 UTF-8 或无法解析为 JSON。
 - `INVALID_CORRELATION_INPUT`：`results`/`lineage` 结构、标识、重复记录或边有误。
 - `UNKNOWN_CORRELATION_REFERENCE`：校验结果引用了未声明的数据集或字段。
+
+除标准输入与标准输出外，不写文件、不访问外部服务。
+
+### dq correlate-links
+
+从标准输入读取跨数据集关联定位的 UTF-8 JSON 对象（`results`、`lineage`、`sample_links` 均必填）：
+
+```bash
+dq correlate-links < correlate-links.json
+```
+
+其中 `results`、`lineage` 与 `dq correlate` 完全相同；`sample_links` 为无向关联关系列表，每条含 `left`、`right`，端点只含 `dataset_id`、`sample_id`：
+
+```json
+{
+  "results": [
+    {"rule_id": "r1", "dataset_id": "ods", "field_id": "name", "sample_id": "a", "violated": true, "value": "x"},
+    {"rule_id": "r2", "dataset_id": "dwd", "field_id": "label", "sample_id": "b", "violated": true, "value": "y"}
+  ],
+  "lineage": {
+    "datasets": ["ods", "dwd"],
+    "fields": {"ods": ["name"], "dwd": ["label"]},
+    "edges": [
+      {"source": {"dataset": "dwd", "field": "label"},
+       "target": {"dataset": "ods", "field": "name"}, "type": "upstream"}
+    ]
+  },
+  "sample_links": [
+    {"left": {"dataset_id": "ods", "sample_id": "a"},
+     "right": {"dataset_id": "dwd", "sample_id": "b"}}
+  ]
+}
+```
+
+合法输入退出码为 0 并输出上述跨数据集关联事件（`sample_refs`、`rules`、`fields`、`upstream_fields`、`downstream_fields`）；输入有误时退出码为 2 且 `message` 非空，错误码依次为：
+
+- `INVALID_JSON`：输入不是合法 UTF-8 或无法解析为 JSON。
+- `INVALID_CORRELATION_INPUT`：`results`/`lineage` 结构、标识、重复记录或边有误。
+- `UNKNOWN_CORRELATION_REFERENCE`：校验结果引用了未声明的数据集或字段。
+- `INVALID_LINKED_CORRELATION_INPUT`：`sample_links` 结构、标识有误，或存在自链接、重复关系。
+- `UNKNOWN_LINKED_CORRELATION_REFERENCE`：链接端点在 `results` 中找不到相同 `dataset_id` + `sample_id` 的结果。
 
 除标准输入与标准输出外，不写文件、不访问外部服务。
 

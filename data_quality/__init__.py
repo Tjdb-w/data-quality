@@ -15,7 +15,10 @@ from .composite import (
 )
 from .correlation import (
     InvalidCorrelationInputError,
+    InvalidLinkedCorrelationInputError,
     UnknownCorrelationReferenceError,
+    UnknownLinkedCorrelationReferenceError,
+    correlate_linked_violations,
     correlate_violations,
 )
 from .field_impact import (
@@ -53,6 +56,7 @@ __all__ = [
     "explain_lineage_paths",
     "explain_field_lineage_paths",
     "correlate_violations",
+    "correlate_linked_violations",
     "analyze_field_impacts",
     "register_composite_rules",
     "evaluate_composite_rules",
@@ -78,6 +82,8 @@ __all__ = [
     "LineageNodeNotFoundError",
     "InvalidCorrelationInputError",
     "UnknownCorrelationReferenceError",
+    "InvalidLinkedCorrelationInputError",
+    "UnknownLinkedCorrelationReferenceError",
 ]
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
