@@ -11,6 +11,10 @@ from .field_lineage import (
     UnknownFieldLineageTargetError,
     trace_field_lineage,
 )
+from .impact import (
+    ImpactInputError,
+    analyze_field_impacts,
+)
 from .lineage import (
     InvalidLineageInputError,
     InvalidLineageQueryError,
@@ -36,6 +40,7 @@ __all__ = [
     "explain_lineage_paths",
     "explain_field_lineage_paths",
     "correlate_violations",
+    "analyze_field_impacts",
     "DataQualityError",
     "InvalidInputError",
     "InvalidRuleError",
@@ -48,6 +53,7 @@ __all__ = [
     "LineageNodeNotFoundError",
     "InvalidCorrelationInputError",
     "UnknownCorrelationReferenceError",
+    "ImpactInputError",
 ]
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
