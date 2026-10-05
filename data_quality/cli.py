@@ -1,7 +1,8 @@
 """Command line interface: ``dq validate``, ``dq lineage``,
 ``dq field-lineage``, ``dq lineage-paths``, ``dq field-lineage-paths``,
 ``dq correlate``, ``dq correlate-links``, ``dq violation-origins``,
-``dq field-impact``, ``dq query-results``, ``dq snapshot-diff``.
+``dq field-impact``, ``dq query-results``, ``dq snapshot-diff``,
+``dq reference-integrity``.
 
 All subcommands read a UTF-8 JSON object from standard input and write a
 UTF-8 JSON result to standard output.
@@ -33,6 +34,10 @@ and explains the concrete field-level upstream/downstream paths.
 ``dq snapshot-diff`` reads ``{"baseline": {"results": [...]},
 "current": {"results": [...]}, "lineage": {...}}`` and consumes already
 evaluated check results without re-running any rule.
+``dq reference-integrity`` reads ``{"datasets": {...}, "rules": [...]}``
+where ``datasets`` maps dataset ids to lists of records and ``rules`` are
+``{rule_id, source_dataset, source_field, target_dataset, target_field}``
+reference rules.
 
 Error JSON has the shape ``{"error": {"code": ..., "message": ...}}`` and
 the process exits with status 2:
@@ -76,6 +81,12 @@ the process exits with status 2:
                                         lineage are malformed
 * ``UNKNOWN_SNAPSHOT_REFERENCE``      - snapshot-diff result references an
                                         undeclared dataset or field
+* ``INVALID_REFERENCE_INPUT``         - reference-integrity datasets/records
+                                        are malformed
+* ``INVALID_REFERENCE_RULE``          - a reference rule is malformed or has
+                                        a duplicate rule_id
+* ``UNKNOWN_REFERENCE_DATASET``       - a reference rule names a dataset not
+                                        present in datasets
 """
 
 from __future__ import annotations
@@ -117,6 +128,12 @@ from .origin_analysis import (
     UnknownOriginReferenceError,
     UnknownOriginTargetError,
     analyze_violation_origins,
+)
+from .reference_integrity import (
+    InvalidReferenceInputError,
+    InvalidReferenceRuleError,
+    UnknownReferenceDatasetError,
+    validate_references,
 )
 from .snapshot_diff import (
     InvalidSnapshotInputError,
@@ -470,6 +487,38 @@ def _run_snapshot_diff() -> int:
     return EXIT_OK
 
 
+def _run_reference_integrity() -> int:
+    payload = _read_json_payload()
+    if payload is _PARSE_FAILED:
+        return EXIT_ERROR
+
+    if not isinstance(payload, dict):
+        return _emit_error(
+            "INVALID_REFERENCE_INPUT", "input payload must be a JSON object"
+        )
+    if "datasets" not in payload:
+        return _emit_error(
+            "INVALID_REFERENCE_INPUT", "payload is missing 'datasets'"
+        )
+    if "rules" not in payload:
+        return _emit_error(
+            "INVALID_REFERENCE_INPUT", "payload is missing 'rules'"
+        )
+
+    try:
+        result = validate_references(payload["datasets"], payload["rules"])
+    except InvalidReferenceRuleError as exc:
+        return _emit_error("INVALID_REFERENCE_RULE", str(exc))
+    except InvalidReferenceInputError as exc:
+        return _emit_error("INVALID_REFERENCE_INPUT", str(exc))
+    except UnknownReferenceDatasetError as exc:
+        return _emit_error("UNKNOWN_REFERENCE_DATASET", str(exc))
+
+    json.dump(result, sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+    return EXIT_OK
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="dq",
@@ -554,6 +603,13 @@ def build_parser() -> argparse.ArgumentParser:
         "input",
     )
     snapshot_diff_parser.set_defaults(handler=_run_snapshot_diff)
+
+    reference_integrity_parser = subparsers.add_parser(
+        "reference-integrity",
+        help="validate cross-dataset field references from a UTF-8 JSON "
+        "object on standard input",
+    )
+    reference_integrity_parser.set_defaults(handler=_run_reference_integrity)
     return parser
 
 

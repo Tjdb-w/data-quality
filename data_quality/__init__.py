@@ -48,6 +48,12 @@ from .origin_analysis import (
     UnknownOriginTargetError,
     analyze_violation_origins,
 )
+from .reference_integrity import (
+    InvalidReferenceInputError,
+    InvalidReferenceRuleError,
+    UnknownReferenceDatasetError,
+    validate_references,
+)
 from .snapshot_diff import (
     InvalidSnapshotInputError,
     UnknownSnapshotReferenceError,
@@ -62,6 +68,7 @@ from .validator import (
 
 __all__ = [
     "validate",
+    "validate_references",
     "trace_lineage",
     "trace_field_lineage",
     "explain_lineage_paths",
@@ -100,6 +107,9 @@ __all__ = [
     "InvalidOriginInputError",
     "UnknownOriginReferenceError",
     "UnknownOriginTargetError",
+    "InvalidReferenceInputError",
+    "InvalidReferenceRuleError",
+    "UnknownReferenceDatasetError",
     "InvalidSnapshotInputError",
     "UnknownSnapshotReferenceError",
 ]

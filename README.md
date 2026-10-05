@@ -18,6 +18,7 @@
 - 已实现：字段级质量影响分析（`analyze_field_impacts` 与命令行 `dq field-impact`）。
 - 已实现：两次快照的异常漂移对比（`compare_quality_snapshots` 与命令行 `dq snapshot-diff`）。
 - 已实现：跨字段一致性规则（`register_composite_rules` / `evaluate_composite_rules` / `query_composite_results`，并经 `validate` 与命令行 `dq validate` / `dq query-results` 使用）。
+- 已实现：跨数据集引用完整性校验（`validate_references` 与命令行 `dq reference-integrity`）。
 
 ## 安装
 
@@ -208,6 +209,70 @@ adapted = composite_results_to_impact_inputs(results)
 | `InvalidRecordReferenceError` | `INVALID_RECORD_REFERENCE` | 执行时记录定位无法解析，或记录本身不是 JSON 对象列表 |
 
 空规则集、重复 `rule_id`、未知严重级别、不支持的关联条件分别对应上表前四个错误码，绝不静默忽略或改写为默认规则。
+
+## 跨数据集引用完整性校验
+
+`validate_references` 在既有单数据集规则校验之外，检查外键式的跨数据集引用：来源数据集某字段的每个非 `null` 值都必须在目标数据集的目标字段中存在按 JSON 相等匹配的值，否则记为一条违规。既有规则校验、异常关联、字段影响与血缘能力均不变更。
+
+```python
+from data_quality import validate_references
+
+result = validate_references(datasets, rules)
+```
+
+- `datasets`：JSON 对象，按 `dataset_id` 映射到记录数组；记录必须为 JSON 对象（dict）。
+- `rules`：规则对象数组，每条恰好包含五个非空字符串键：`rule_id`、`source_dataset`、`source_field`、`target_dataset`、`target_field`。
+- `rule_id` 在数组内唯一；规则在比较任何值之前先统一校验，随后**按数组顺序**执行；同一规则内按来源记录顺序检查。
+
+### 检查语义
+
+- 来源记录缺少 `source_field` 字段、或该字段值为 `null` 时跳过（不计数、不违规）。
+- 其余每个来源值都必须与目标数据集某条记录的 `target_field` 值按 JSON 相等匹配（布尔不与数字相等、对象按键/值、数组按顺序）；目标记录缺少 `target_field` 时不提供匹配值。
+- 无任何命中即为违规。来源值为对象/数组时按结构比较。
+
+### 返回结果
+
+结果恰好包含 `passed`、`summary`、`violations` 三个顶层键：
+
+```json
+{
+  "passed": false,
+  "summary": {
+    "dataset_count": 2,
+    "rule_count": 1,
+    "checked_value_count": 2,
+    "violation_count": 1
+  },
+  "violations": [
+    {
+      "rule_id": "order-customer-fk",
+      "source": {
+        "dataset": "orders",
+        "record_index": 1,
+        "record_id": "o2",
+        "field": "customer_id",
+        "value": "cX"
+      },
+      "target": {"dataset": "customers", "field": "id"},
+      "message": "has no matching target value"
+    }
+  ]
+}
+```
+
+- 每条违规恰好含 `rule_id`、`source`、`target`、`message` 四键。
+- `source` 恰好含 `dataset`、`record_index`（从 0 开始）、`record_id`（记录的 `id`，无则为 `null`）、`field`、`value`（原始来源值）五键。
+- `target` 恰好含 `dataset`、`field` 两键；`message` 固定为 `"has no matching target value"`。
+- `summary` 恰好含 `dataset_count`（datasets 键数）、`rule_count`、`checked_value_count`（参与比较的非 `null` 来源值数）、`violation_count` 四键。
+- 无违规时 `passed` 为 `true`、`violations` 为空。
+
+### 错误
+
+以下异常均公开于 `data_quality`，且不返回部分结果（校验顺序：datasets 结构 → rules 结构 → 数据集引用解析）：
+
+- `InvalidReferenceInputError`（`ValueError` 子类，码 `INVALID_REFERENCE_INPUT`）：`datasets` 不是对象、数据集 id 为空、某数据集记录不是数组、或记录不是 JSON 对象。
+- `InvalidReferenceRuleError`（`ValueError` 子类，码 `INVALID_REFERENCE_RULE`）：`rules` 不是数组、规则不是对象、键缺失或多余、字段不是非空字符串、`rule_id` 重复。
+- `UnknownReferenceDatasetError`（`LookupError` 子类，码 `UNKNOWN_REFERENCE_DATASET`）：规则引用了 `datasets` 中不存在的来源或目标数据集。
 
 ## 血缘追溯
 
@@ -972,6 +1037,39 @@ dq snapshot-diff < snapshots.json
 - `INVALID_JSON`：输入不是合法 UTF-8 或无法解析为 JSON。
 - `INVALID_SNAPSHOT_INPUT`：快照、结果或血缘结构、标识、重复记录或边有误。
 - `UNKNOWN_SNAPSHOT_REFERENCE`：任一侧结果引用了未声明的数据集或字段。
+
+除标准输入与标准输出外，不写文件、不访问外部服务。
+
+### dq reference-integrity
+
+从标准输入读取跨数据集引用完整性校验的 UTF-8 JSON 对象，`datasets`、`rules` 两个顶层键均必填；契约与 `validate_references` 的 Python 输入完全相同：
+
+```bash
+dq reference-integrity < references.json
+```
+
+```json
+{
+  "datasets": {
+    "orders": [
+      {"id": "o1", "customer_id": "c1"},
+      {"id": "o2", "customer_id": "cX"}
+    ],
+    "customers": [{"id": "c1"}]
+  },
+  "rules": [
+    {"rule_id": "fk", "source_dataset": "orders", "source_field": "customer_id",
+     "target_dataset": "customers", "target_field": "id"}
+  ]
+}
+```
+
+合法输入退出码为 0，标准输出只写一行与 `validate_references` 完全相同的结果 JSON（`passed`、`summary`、`violations`）。输入有误时退出码为 2 且标准输出仅含顶层 `error` 对象（只有 `code`、`message` 两个键），错误码依次为：
+
+- `INVALID_JSON`：输入不是合法 UTF-8 或无法解析为 JSON。
+- `INVALID_REFERENCE_INPUT`：载荷不是 JSON 对象、缺少 `datasets`/`rules`，或 `datasets`/记录结构错误。
+- `INVALID_REFERENCE_RULE`：规则键缺失或多余、字段不是非空字符串、`rule_id` 重复。
+- `UNKNOWN_REFERENCE_DATASET`：规则引用了 `datasets` 中不存在的数据集。
 
 除标准输入与标准输出外，不写文件、不访问外部服务。
 
