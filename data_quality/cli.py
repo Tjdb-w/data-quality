@@ -1,7 +1,7 @@
 """Command line interface: ``dq validate``, ``dq lineage``,
 ``dq field-lineage``, ``dq lineage-paths``, ``dq field-lineage-paths``,
 ``dq correlate``, ``dq correlate-links``, ``dq violation-origins``,
-``dq query-results``.
+``dq field-impact``, ``dq query-results``.
 
 All subcommands read a UTF-8 JSON object from standard input and write a
 UTF-8 JSON result to standard output.
@@ -28,6 +28,8 @@ and explains the concrete field-level upstream/downstream paths.
 "sample_links": [...]}``.
 ``dq violation-origins`` reads ``{"results": [...], "lineage": {...},
 "targets": [...]}``.
+``dq field-impact`` reads ``{"datasets": {...}, "lineageEdges": [...],
+"validationResults": [...], "anomalySamples": {...}, "seedFields": [...]}``.
 
 Error JSON has the shape ``{"error": {"code": ..., "message": ...}}`` and
 the process exits with status 2:
@@ -64,6 +66,9 @@ the process exits with status 2:
                                         an undeclared dataset or field
 * ``UNKNOWN_ORIGIN_TARGET``           - violation-origins target has no
                                         matching violated result
+* ``INVALID_IMPACT_INPUT``            - field-impact payload structure, key
+                                        set, references, rule statuses or
+                                        sample mapping is malformed
 """
 
 from __future__ import annotations
@@ -82,6 +87,7 @@ from .correlation import (
     correlate_linked_violations,
     correlate_violations,
 )
+from .field_impact import ImpactInputError, analyze_field_impacts
 from .field_lineage import (
     InvalidFieldLineageInputError,
     InvalidFieldLineageQueryError,
@@ -415,6 +421,21 @@ def _run_violation_origins() -> int:
     return EXIT_OK
 
 
+def _run_field_impact() -> int:
+    payload = _read_json_payload()
+    if payload is _PARSE_FAILED:
+        return EXIT_ERROR
+
+    try:
+        result = analyze_field_impacts(payload)
+    except ImpactInputError as exc:
+        return _emit_error("INVALID_IMPACT_INPUT", str(exc))
+
+    json.dump(result, sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+    return EXIT_OK
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="dq",
@@ -477,6 +498,13 @@ def build_parser() -> argparse.ArgumentParser:
         "of violated targets from a UTF-8 JSON object on standard input",
     )
     violation_origins_parser.set_defaults(handler=_run_violation_origins)
+
+    field_impact_parser = subparsers.add_parser(
+        "field-impact",
+        help="analyze downstream field-level quality impact from a UTF-8 "
+        "JSON object on standard input",
+    )
+    field_impact_parser.set_defaults(handler=_run_field_impact)
 
     query_results_parser = subparsers.add_parser(
         "query-results",

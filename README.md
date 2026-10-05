@@ -15,7 +15,7 @@
 - 已实现：异常样本跨规则关联定位（`correlate_violations` 与命令行 `dq correlate`）。
 - 已实现：跨数据集关联样本的异常关联定位（`correlate_linked_violations` 与命令行 `dq correlate-links`）。
 - 已实现：异常来源证据分析（`analyze_violation_origins` 与命令行 `dq violation-origins`）。
-- 已实现：字段级质量影响分析（`analyze_field_impacts`，Python API；命令行不变）。
+- 已实现：字段级质量影响分析（`analyze_field_impacts` 与命令行 `dq field-impact`）。
 - 已实现：跨字段一致性规则（`register_composite_rules` / `evaluate_composite_rules` / `query_composite_results`，并经 `validate` 与命令行 `dq validate` / `dq query-results` 使用）。
 
 ## 安装
@@ -629,6 +629,8 @@ result = analyze_field_impacts(payload)
 - 任一标识（数据集、字段、规则、样本编号、种子引用）为空或不是字符串。
 - 规则 `status` 不属于 `passed`、`failed`、`skipped`。
 
+命令行 `dq field-impact` 下，`ImpactInputError` 统一映射为错误码 `INVALID_IMPACT_INPUT`（退出码 2）；无法解析为 UTF-8 JSON 时仍为 `INVALID_JSON`，不返回部分结果。
+
 ## 命令行
 
 ### dq validate
@@ -836,6 +838,21 @@ dq violation-origins < origins.json
 - `UNKNOWN_ORIGIN_TARGET`：目标没有对应的 `violated=true` 结果。
 
 除标准输入与标准输出外，不写文件、不访问外部服务。
+
+### dq field-impact
+
+从标准输入读取字段级质量影响分析的 UTF-8 JSON 对象（`datasets`、`lineageEdges`、`validationResults`、`anomalySamples`、`seedFields` 五个键均必填，键多余或缺失均报错），契约与 `analyze_field_impacts` 的 Python 输入完全相同：
+
+```bash
+dq field-impact < field-impact.json
+```
+
+合法输入退出码为 0，标准输出写入与 `analyze_field_impacts` 完全相同的 JSON（`status`、`impacts`、`unresolvedReferences`；字段可达性、路径选取、规则与样本筛选、悬空边排序等语义均不改变）。输入有误时退出码为 2 且 `message` 非空，错误码为：
+
+- `INVALID_JSON`：输入不是合法 UTF-8 或无法解析为 JSON。
+- `INVALID_IMPACT_INPUT`：顶层不是对象，或五个顶层键的嵌套结构、键集合、字段引用、规则状态、样本映射不符合公开契约。
+
+出错时仅输出 `{"error": {"code": ..., "message": ...}}`，不返回部分结果。除标准输入与标准输出外，不写文件、不访问外部服务。
 
 ## 测试
 
