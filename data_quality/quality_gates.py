@@ -29,12 +29,22 @@ and malformed rule definitions raise
 duplicated gate ``rule_id`` values or illegal severity / ratio values
 raise :class:`InvalidQualityGateRuleError`; a gate referencing an
 unknown rule raises :class:`UnknownQualityGateSourceError`.
+
+An optional ``exemptions`` list (see
+:func:`data_quality.apply_violation_exemptions`) waives individual
+violations: ``failed_count``, ``ratio`` and ``samples`` only count the
+still-active violations while waived ones are reported separately as
+``waived_count`` / ``waived_samples``. Malformed, duplicated,
+conflicting or unmatched exemptions raise
+:class:`data_quality.exemptions.InvalidExemptionError`. When
+``exemptions`` is omitted or empty the report is unchanged.
 """
 
 from __future__ import annotations
 
 from typing import Any, Dict, List
 
+from .exemptions import _match_exemptions, _match_key_of
 from .validator import (
     InvalidInputError,
     _check_rule,
@@ -144,6 +154,8 @@ def evaluate_quality_gates(
     records: Any,
     rules: Any,
     gates: Any,
+    *,
+    exemptions: Any = None,
 ) -> Dict[str, Any]:
     """Aggregate single-field rule failure ratios into dataset gates.
 
@@ -160,6 +172,15 @@ def evaluate_quality_gates(
         in ``[0, 1]``, never boolean) and ``severity`` (one of
         ``error`` / ``warning`` / ``info``). Gates are aggregated in
         array order.
+    :param exemptions: optional list of exemption objects as accepted by
+        :func:`data_quality.apply_violation_exemptions`. When supplied
+        (non-empty), each exemption must match exactly one single-field
+        violation; ``failed_count``, ``ratio`` and ``samples`` then only
+        count the still-active violations and every gate result
+        additionally carries ``waived_count`` and ``waived_samples``
+        (the waived samples in record order, each extended with
+        ``exemption_id`` and ``reason``). When omitted or empty the
+        report is byte-for-byte the historical shape.
     :returns: ``{"dataset": dataset, "results": [...]}`` where each
         result carries ``rule_id``, ``source_rule_id``, ``status``,
         ``failed_count``, ``record_count``, ``ratio`` and ``samples``.
@@ -174,6 +195,8 @@ def evaluate_quality_gates(
         :class:`~data_quality.validator.InvalidRuleError` on malformed
         rule definitions and :class:`InvalidQualityGateRuleError` on
         malformed gates, duplicated gate ids or illegal severity / ratio.
+        :class:`data_quality.exemptions.InvalidExemptionError` is raised
+        on malformed, duplicated, conflicting or unmatched exemptions.
     :raises LookupError: :class:`UnknownQualityGateSourceError` when a
         gate names a rule that ``rules`` does not declare.
     """
@@ -201,8 +224,8 @@ def evaluate_quality_gates(
     record_count = len(records)
 
     violations_by_rule: Dict[str, List[Dict[str, Any]]] = {}
+    all_violations: List[Dict[str, Any]] = []
     if record_count:
-        all_violations: List[Dict[str, Any]] = []
         for rule in compiled_rules:
             _check_rule(rule, records, all_violations)
         for violation in all_violations:
@@ -210,10 +233,31 @@ def evaluate_quality_gates(
                 violation
             )
 
+    # Exemptions are validated and matched against every single-field
+    # violation after all definitions and records have been checked; an
+    # omitted or empty list keeps the historical report shape.
+    exemption_by_key = None
+    if exemptions:
+        exemption_by_key = _match_exemptions(all_violations, exemptions)
+
     results: List[Dict[str, Any]] = []
     for gate in validated_gates:
         rule_violations = violations_by_rule.get(gate["source_rule_id"], [])
-        samples = [_to_sample(violation) for violation in rule_violations]
+
+        waived_samples: List[Dict[str, Any]] = []
+        if exemption_by_key is None:
+            samples = [_to_sample(violation) for violation in rule_violations]
+        else:
+            samples = []
+            for violation in rule_violations:
+                exemption = exemption_by_key.get(_match_key_of(violation))
+                if exemption is None:
+                    samples.append(_to_sample(violation))
+                else:
+                    waived_sample = _to_sample(violation)
+                    waived_sample["exemption_id"] = exemption["exemption_id"]
+                    waived_sample["reason"] = exemption["reason"]
+                    waived_samples.append(waived_sample)
         failed_count = len(samples)
 
         if record_count == 0:
@@ -226,16 +270,18 @@ def evaluate_quality_gates(
             else:
                 status = STATUS_FAILED
 
-        results.append(
-            {
-                "rule_id": gate["rule_id"],
-                "source_rule_id": gate["source_rule_id"],
-                "status": status,
-                "failed_count": failed_count,
-                "record_count": record_count,
-                "ratio": ratio,
-                "samples": samples,
-            }
-        )
+        entry: Dict[str, Any] = {
+            "rule_id": gate["rule_id"],
+            "source_rule_id": gate["source_rule_id"],
+            "status": status,
+            "failed_count": failed_count,
+            "record_count": record_count,
+            "ratio": ratio,
+            "samples": samples,
+        }
+        if exemption_by_key is not None:
+            entry["waived_count"] = len(waived_samples)
+            entry["waived_samples"] = waived_samples
+        results.append(entry)
 
     return {"dataset": dataset, "results": results}

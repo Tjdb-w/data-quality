@@ -20,6 +20,7 @@
 - 已实现：跨数据集引用完整性校验（`validate_references` 与命令行 `dq reference-integrity`）。
 - 已实现：数据集级质量门槛（`evaluate_quality_gates` 与命令行 `dq quality-gates`）：以单字段规则为基础，按门槛汇总失败记录比例并给出异常样本。
 - 已实现：跨字段一致性规则（`register_composite_rules` / `evaluate_composite_rules` / `query_composite_results`，并经 `validate` 与命令行 `dq validate` / `dq query-results` 使用）。
+- 已实现：单字段异常豁免（`apply_violation_exemptions` 与命令行 `dq exemptions`；`evaluate_quality_gates` 与 `dq quality-gates` 可选 `exemptions`）：按规则与记录定位精确豁免个别异常，活跃/豁免分列，门槛只按活跃异常计数。
 
 ## 安装
 
@@ -770,6 +771,54 @@ report = evaluate_quality_gates(dataset, records, rules, gates)
 
 校验顺序为规则定义 → 门槛结构 → `source_rule_id` 引用解析 → 记录结构；规则/门槛定义先于记录检查。
 
+### 门槛豁免
+
+`evaluate_quality_gates` 接受可选的 `exemptions` 列表（契约与 `apply_violation_exemptions` 完全相同，见下节）：每条豁免精确匹配一条单字段异常。提供非空豁免后，`failed_count`、`ratio`、`samples` 只统计仍活跃的异常，每条门槛结果另含 `waived_count` 与 `waived_samples`（按记录顺序保留原样例并附加 `exemption_id`、`reason`）；省略或为空时报告与基线完全一致。
+
+## 异常豁免
+
+豁免在既有 `validate` 结果之上做分流，不重跑任何规则、不落盘的输出只含单字段异常（复合结果不含）。
+
+```python
+from data_quality import apply_violation_exemptions
+
+outcome = apply_violation_exemptions(result, exemptions)
+```
+
+- `result`：`validate` 的返回对象（仅取其 `violations`）。
+- `exemptions`：豁免对象列表，每条恰好含六键：
+  - `exemption_id`：唯一、非空的字符串标识；
+  - `rule_id` / `record_index` / `record_id` / `field`：匹配四元组——字符串规则 id、非负整数记录下标（布尔不是整数）、字符串或 `null` 的记录 id、字符串字段名，与异常精确匹配；
+  - `reason`：非空字符串，作为证据保留在被豁免的异常上。
+
+### 豁免结果
+
+```json
+{
+  "status": "violations",
+  "summary": {
+    "input_violation_count": 2,
+    "active_violation_count": 1,
+    "waived_violation_count": 1,
+    "exemption_count": 1
+  },
+  "active_violations": [
+    {"rule_id": "age-range", "record_index": 1, "record_id": "r2", "field": "age", "value": 300, "message": "is out of the allowed range"}
+  ],
+  "waived_violations": [
+    {"rule_id": "age-range", "record_index": 0, "record_id": "r1", "field": "age", "value": 200, "message": "is out of the allowed range", "exemption_id": "ex1", "reason": "known outlier"}
+  ]
+}
+```
+
+- `active_violations` 与 `waived_violations` 按原顺序保留原异常；被豁免的条目附加 `exemption_id`、`reason`。
+- `summary` 四计数满足 `input_violation_count = active_violation_count + waived_violation_count`。
+- 无活跃异常时 `status` 为 `"ok"`（即通过），否则为 `"violations"`。
+
+### 豁免错误
+
+以下情况抛出 `InvalidExemptionError`（`ValueError` 子类，码 `INVALID_EXEMPTION_INPUT`，公开于 `data_quality`），不返回部分结果：`result` 不是 `validate` 结果、`exemptions` 不是列表、豁免不是恰好六键的对象、字段类型非法、`exemption_id` 重复、两条豁免匹配同一异常（冲突），或豁免匹配不到任何异常。
+
 ## 命令行
 
 ### dq validate
@@ -1035,7 +1084,7 @@ dq snapshot-diff < snapshots.json
 
 ### dq quality-gates
 
-从标准输入读取一个 UTF-8 JSON 对象，必填 `records`、`rules`、`gates`，可选 `dataset`；规则与门槛契约与 `evaluate_quality_gates` 的 Python 输入完全相同：
+从标准输入读取一个 UTF-8 JSON 对象，必填 `records`、`rules`、`gates`，可选 `dataset` 与 `exemptions`；规则与门槛契约与 `evaluate_quality_gates` 的 Python 输入完全相同：
 
 ```bash
 dq quality-gates < gates.json
@@ -1061,6 +1110,37 @@ dq quality-gates < gates.json
 - `INVALID_RULE`：单字段规则定义非法。
 - `INVALID_QUALITY_GATE_RULE`：门槛结构非法、`rule_id` 重复、`severity` 非法，或 `max_failed_ratio` 不是 0–1 的 JSON 数字。
 - `UNKNOWN_QUALITY_GATE_SOURCE`：门槛的 `source_rule_id` 未在 `rules` 中声明。
+- `INVALID_EXEMPTION_INPUT`：`exemptions` 非法——豁免结构错误、`exemption_id` 重复、两条豁免冲突或匹配不到任何异常。
+
+### dq exemptions
+
+从标准输入读取一个 UTF-8 JSON 对象，必填 `result`（`dq validate` 的结果）与 `exemptions`（豁免对象列表），契约与 `apply_violation_exemptions` 的 Python 输入完全相同：
+
+```bash
+dq exemptions < exemptions.json
+```
+
+```json
+{
+  "result": {
+    "passed": false,
+    "summary": {"record_count": 1, "violation_count": 1, "checked_rule_count": 1},
+    "violations": [
+      {"rule_id": "age-range", "record_index": 0, "record_id": "r1", "field": "age", "value": 200, "message": "is out of the allowed range"}
+    ]
+  },
+  "exemptions": [
+    {"exemption_id": "ex1", "rule_id": "age-range", "record_index": 0, "record_id": "r1", "field": "age", "reason": "known outlier"}
+  ]
+}
+```
+
+合法输入退出码为 0，标准输出只写一行与 `apply_violation_exemptions` 完全相同的结果 JSON（`status`、`summary`、`active_violations`、`waived_violations`）。输入有误时退出码为 2，标准输出仅含顶层 `error` 对象（只有 `code`、`message` 两个键），错误码依次为：
+
+- `INVALID_JSON`：输入不是合法 UTF-8 或无法解析为 JSON。
+- `INVALID_EXEMPTION_INPUT`：载荷不是 JSON 对象、缺少 `result`/`exemptions`、`result` 不是 `validate` 结果，或豁免结构非法、重复、冲突、匹配不到任何异常。
+
+除标准输入与标准输出外，不写文件、不访问外部服务。
 
 ## 测试
 

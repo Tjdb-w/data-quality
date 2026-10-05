@@ -2,7 +2,7 @@
 ``dq field-lineage``, ``dq lineage-paths``, ``dq field-lineage-paths``,
 ``dq correlate``, ``dq correlate-links``, ``dq violation-origins``,
 ``dq field-impact``, ``dq query-results``, ``dq snapshot-diff``,
-``dq reference-integrity``, ``dq quality-gates``.
+``dq reference-integrity``, ``dq quality-gates``, ``dq exemptions``.
 
 All subcommands read a UTF-8 JSON object from standard input and write a
 UTF-8 JSON result to standard output.
@@ -41,10 +41,17 @@ either ``{"rule_id", "source_dataset", "source_field", "target_dataset",
 "source_dataset", "source_fields", "target_dataset", "target_fields"}``
 with equally long non-empty field arrays paired by position.
 ``dq quality-gates`` reads ``{"dataset": ..., "records": [...],
-"rules": [...], "gates": [...]}`` where each gate is
+"rules": [...], "gates": [...], "exemptions": [...]}`` where each gate is
 ``{"rule_id", "source_rule_id", "max_failed_ratio", "severity"}``;
 records are checked with the existing single-field rules and each gate
-aggregates the failed-record ratio of its ``source_rule_id``.
+aggregates the failed-record ratio of its ``source_rule_id``. The
+optional ``exemptions`` waive individual violations (active counts only;
+waived ones are reported separately).
+``dq exemptions`` reads ``{"result": {...}, "exemptions": [...]}`` where
+``result`` is a ``dq validate`` result and each exemption is
+``{"exemption_id", "rule_id", "record_index", "record_id", "field",
+"reason"}``; it splits the single-field violations into active and
+waived ones without re-running any rule.
 
 Error JSON has the shape ``{"error": {"code": ..., "message": ...}}`` and
 the process exits with status 2:
@@ -104,6 +111,10 @@ the process exits with status 2:
                                         JSON number in [0, 1]
 * ``UNKNOWN_QUALITY_GATE_SOURCE``     - quality-gates gate references a
                                         rule that is not declared
+* ``INVALID_EXEMPTION_INPUT``         - exemptions payload/result is
+                                        malformed, or an exemption is
+                                        malformed, duplicated, conflicting
+                                        or matches no violation
 """
 
 from __future__ import annotations
@@ -114,6 +125,7 @@ import sys
 from typing import Any, List, Optional
 
 from .composite import query_composite_results
+from .exemptions import InvalidExemptionError, apply_violation_exemptions
 from .correlation import (
     InvalidCorrelationInputError,
     InvalidLinkedCorrelationInputError,
@@ -557,6 +569,7 @@ def _run_quality_gates() -> int:
             payload["records"],
             payload["rules"],
             payload["gates"],
+            exemptions=payload.get("exemptions"),
         )
     except InvalidRuleError as exc:
         return _emit_error("INVALID_RULE", str(exc))
@@ -566,8 +579,37 @@ def _run_quality_gates() -> int:
         return _emit_error("INVALID_QUALITY_GATE_RULE", str(exc))
     except UnknownQualityGateSourceError as exc:
         return _emit_error("UNKNOWN_QUALITY_GATE_SOURCE", str(exc))
+    except InvalidExemptionError as exc:
+        return _emit_error("INVALID_EXEMPTION_INPUT", str(exc))
     except DataQualityError as exc:
         return _emit_error(exc.code, str(exc))
+
+    json.dump(result, sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+    return EXIT_OK
+
+
+def _run_exemptions() -> int:
+    payload = _read_json_payload()
+    if payload is _PARSE_FAILED:
+        return EXIT_ERROR
+
+    if not isinstance(payload, dict):
+        return _emit_error(
+            "INVALID_EXEMPTION_INPUT", "input payload must be a JSON object"
+        )
+    for key in ("result", "exemptions"):
+        if key not in payload:
+            return _emit_error(
+                "INVALID_EXEMPTION_INPUT", f"payload is missing {key!r}"
+            )
+
+    try:
+        result = apply_violation_exemptions(
+            payload["result"], payload["exemptions"]
+        )
+    except InvalidExemptionError as exc:
+        return _emit_error("INVALID_EXEMPTION_INPUT", str(exc))
 
     json.dump(result, sys.stdout, ensure_ascii=False)
     sys.stdout.write("\n")
@@ -672,6 +714,13 @@ def build_parser() -> argparse.ArgumentParser:
         "quality gates from a UTF-8 JSON object on standard input",
     )
     quality_gates_parser.set_defaults(handler=_run_quality_gates)
+
+    exemptions_parser = subparsers.add_parser(
+        "exemptions",
+        help="split a validate result into active and waived violations "
+        "from a UTF-8 JSON object on standard input",
+    )
+    exemptions_parser.set_defaults(handler=_run_exemptions)
     return parser
 
 
