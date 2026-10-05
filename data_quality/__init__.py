@@ -48,6 +48,12 @@ from .origin_analysis import (
     UnknownOriginTargetError,
     analyze_violation_origins,
 )
+from .reference_integrity import (
+    InvalidReferenceInputError,
+    InvalidReferenceRuleError,
+    UnknownReferenceDatasetError,
+    validate_references,
+)
 from .snapshot_diff import (
     InvalidSnapshotInputError,
     UnknownSnapshotReferenceError,
@@ -71,6 +77,7 @@ __all__ = [
     "analyze_violation_origins",
     "analyze_field_impacts",
     "compare_quality_snapshots",
+    "validate_references",
     "register_composite_rules",
     "evaluate_composite_rules",
     "query_composite_results",
@@ -102,6 +109,9 @@ __all__ = [
     "UnknownOriginTargetError",
     "InvalidSnapshotInputError",
     "UnknownSnapshotReferenceError",
+    "InvalidReferenceInputError",
+    "InvalidReferenceRuleError",
+    "UnknownReferenceDatasetError",
 ]
 
 __version__ = "0.9.0"
