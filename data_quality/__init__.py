@@ -48,6 +48,11 @@ from .origin_analysis import (
     UnknownOriginTargetError,
     analyze_violation_origins,
 )
+from .quality_gates import (
+    InvalidQualityGateRuleError,
+    UnknownQualityGateSourceError,
+    evaluate_quality_gates,
+)
 from .reference_integrity import (
     InvalidReferenceInputError,
     InvalidReferenceRuleError,
@@ -78,6 +83,7 @@ __all__ = [
     "analyze_field_impacts",
     "compare_quality_snapshots",
     "validate_references",
+    "evaluate_quality_gates",
     "register_composite_rules",
     "evaluate_composite_rules",
     "query_composite_results",
@@ -112,6 +118,8 @@ __all__ = [
     "InvalidReferenceInputError",
     "InvalidReferenceRuleError",
     "UnknownReferenceDatasetError",
+    "InvalidQualityGateRuleError",
+    "UnknownQualityGateSourceError",
 ]
 
 __version__ = "0.9.0"

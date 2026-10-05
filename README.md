@@ -19,6 +19,7 @@
 - 已实现：两次快照的异常漂移对比（`compare_quality_snapshots` 与命令行 `dq snapshot-diff`）。
 - 已实现：跨数据集引用完整性校验（`validate_references` 与命令行 `dq reference-integrity`）。
 - 已实现：跨字段一致性规则（`register_composite_rules` / `evaluate_composite_rules` / `query_composite_results`，并经 `validate` 与命令行 `dq validate` / `dq query-results` 使用）。
+- 已实现：数据集级比例门槛（`evaluate_quality_gates` 与命令行 `dq quality-gates`）。
 
 ## 安装
 
@@ -209,6 +210,71 @@ adapted = composite_results_to_impact_inputs(results)
 | `InvalidRecordReferenceError` | `INVALID_RECORD_REFERENCE` | 执行时记录定位无法解析，或记录本身不是 JSON 对象列表 |
 
 空规则集、重复 `rule_id`、未知严重级别、不支持的关联条件分别对应上表前四个错误码，绝不静默忽略或改写为默认规则。
+
+## 数据集级比例门槛
+
+单字段规则只回答「某条记录的某个字段是否违反」，数据集级比例门槛则在其之上汇总**违反记录比例**，回答「整张数据集的质量是否在容忍度内」。门槛沿用当前单字段规则的定义与判定，不重新实现规则。
+
+```python
+from data_quality import evaluate_quality_gates
+
+report = evaluate_quality_gates(dataset, records, rules, gates)
+```
+
+- `dataset`：数据集标识，原样写入报告，不做解释或校验。
+- `records`：JSON 对象（dict）组成的列表；结构非法抛 `InvalidInputError`，与 `validate` 完全一致。
+- `rules`：单字段规则对象列表，定义与判定完全沿用 `validate`；定义非法抛 `InvalidRuleError`。
+- `gates`：门槛对象列表，按数组顺序汇总。
+
+### 门槛定义
+
+每个 gate 恰好含 `rule_id`、`source_rule_id`、`max_failed_ratio`、`severity` 四个键：
+
+- `rule_id`：非空字符串，在 gate 列表内唯一。
+- `source_rule_id`：非空字符串，必须引用 `rules` 中某条规则的 `id`。
+- `max_failed_ratio`：0 到 1（含）的 JSON 数字；布尔值不是数字。
+- `severity`：只能是 `error`、`warning`、`info`。
+
+### 判定与报告
+
+按 gate 顺序汇总其 `source_rule_id` 的违反项：
+
+- `failed_count`：该来源规则的违反项数；`record_count`：记录数；`ratio = failed_count / record_count`。
+- `ratio <= max_failed_ratio` 为 `PASSED`，否则为 `FAILED`（恰等门槛算通过）。
+- `samples` 按记录顺序原样保留每个违反项的 `record_index`、`record_id`、`field`、`value`、`message`（即单字段规则违反样本的五个定位字段）。
+
+```json
+{
+  "dataset": "dwd_orders",
+  "record_count": 4,
+  "results": [
+    {
+      "rule_id": "age-ratio",
+      "source_rule_id": "age-range",
+      "status": "FAILED",
+      "failed_count": 2,
+      "record_count": 4,
+      "ratio": 0.5,
+      "samples": [
+        {"record_index": 1, "record_id": "r2", "field": "age", "value": 200, "message": "is out of the allowed range"},
+        {"record_index": 2, "record_id": "r3", "field": "age", "value": null, "message": "is out of the allowed range"}
+      ]
+    }
+  ]
+}
+```
+
+空数据集（`records` 为空列表）时 `record_count` 为 0，每个 gate 结果为 `SKIPPED_EMPTY_DATASET`、`ratio` 为 `null`、`samples` 为空，既不计通过也不计失败；gate 定义与来源引用仍照常校验。
+
+### 门槛错误
+
+以下情况抛异常（均公开于 `data_quality`）：
+
+- `InvalidQualityGateRuleError`（`ValueError` 子类，码 `INVALID_QUALITY_GATE_RULE`）：gate 结构非法（不是列表/对象、键缺失或多余）、`rule_id` 重复或为空、`severity` 非法、`max_failed_ratio` 不是 0–1 的数字（含布尔值）。
+- `UnknownQualityGateSourceError`（`LookupError` 子类，码 `UNKNOWN_QUALITY_GATE_SOURCE`）：`source_rule_id` 未在 `rules` 中定义。
+- 记录结构非法仍抛 `InvalidInputError`；规则定义非法仍抛 `InvalidRuleError`（规则沿用现有校验，规则错误先于记录与门槛暴露）。
+
+gate 结构先于来源引用校验：同一条 gate 既结构非法又引用未知规则时，报 `InvalidQualityGateRuleError`。
 
 ## 血缘追溯
 
@@ -973,6 +1039,42 @@ dq snapshot-diff < snapshots.json
 - `INVALID_JSON`：输入不是合法 UTF-8 或无法解析为 JSON。
 - `INVALID_SNAPSHOT_INPUT`：快照、结果或血缘结构、标识、重复记录或边有误。
 - `UNKNOWN_SNAPSHOT_REFERENCE`：任一侧结果引用了未声明的数据集或字段。
+
+除标准输入与标准输出外，不写文件、不访问外部服务。
+
+### dq quality-gates
+
+从标准输入读取数据集级比例门槛的 UTF-8 JSON 对象，`dataset`、`records`、`rules`、`gates` 四个顶层键均必填（键多余会被忽略，缺失报 `INVALID_INPUT`）；`rules` 沿用 `dq validate` 的单字段规则定义，每个 gate 恰好含 `rule_id`、`source_rule_id`、`max_failed_ratio`、`severity`：
+
+```bash
+dq quality-gates < quality-gates.json
+```
+
+```json
+{
+  "dataset": "dwd_orders",
+  "records": [
+    {"id": "r1", "age": 5},
+    {"id": "r2", "age": 200}
+  ],
+  "rules": [
+    {"id": "age-range", "type": "range",
+     "options": {"field": "age", "min": 0, "max": 120}}
+  ],
+  "gates": [
+    {"rule_id": "age-ratio", "source_rule_id": "age-range",
+     "max_failed_ratio": 0.1, "severity": "error"}
+  ]
+}
+```
+
+合法执行退出码恒为 0，即使结果中出现 `FAILED` 或 `SKIPPED_EMPTY_DATASET`；标准输出只写一行与 `evaluate_quality_gates` 完全相同的报告 JSON（`dataset`、`record_count`、`results`；比例判定、样本顺序与字段、空数据集跳过语义均不改变）。输入有误时退出码为 2 且 `message` 非空，标准输出仅含顶层 `error` 对象（只有 `code`、`message` 两个键），错误码依次为：
+
+- `INVALID_JSON`：输入不是合法 UTF-8 或无法解析为 JSON。
+- `INVALID_INPUT`：载荷不是 JSON 对象、缺少四个顶层键之一，或 `records` 结构错误。
+- `INVALID_RULE`：单字段规则定义非法。
+- `INVALID_QUALITY_GATE_RULE`：gate 结构非法、`rule_id` 重复、`severity` 非法或 `max_failed_ratio` 不是 0–1 的数字。
+- `UNKNOWN_QUALITY_GATE_SOURCE`：gate 的 `source_rule_id` 未在 `rules` 中定义。
 
 除标准输入与标准输出外，不写文件、不访问外部服务。
 
