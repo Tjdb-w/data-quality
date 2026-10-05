@@ -2,7 +2,7 @@
 ``dq field-lineage``, ``dq lineage-paths``, ``dq field-lineage-paths``,
 ``dq correlate``, ``dq correlate-links``, ``dq violation-origins``,
 ``dq field-impact``, ``dq query-results``, ``dq snapshot-diff``,
-``dq reference-integrity``.
+``dq reference-integrity``, ``dq quality-gates``.
 
 All subcommands read a UTF-8 JSON object from standard input and write a
 UTF-8 JSON result to standard output.
@@ -38,6 +38,11 @@ evaluated check results without re-running any rule.
 where ``datasets`` maps dataset ids to record arrays and each rule is
 ``{"rule_id", "source_dataset", "source_field", "target_dataset",
 "target_field"}``.
+``dq quality-gates`` reads ``{"dataset": ..., "records": [...],
+"rules": [...], "gates": [...]}`` where each gate is
+``{"rule_id", "source_rule_id", "max_failed_ratio", "severity"}``;
+records are checked with the existing single-field rules and each gate
+aggregates the failed-record ratio of its ``source_rule_id``.
 
 Error JSON has the shape ``{"error": {"code": ..., "message": ...}}`` and
 the process exits with status 2:
@@ -88,6 +93,13 @@ the process exits with status 2:
                                         rule_id is duplicated
 * ``UNKNOWN_REFERENCE_DATASET``       - reference-integrity rule names an
                                         undeclared dataset
+* ``INVALID_QUALITY_GATE_RULE``       - quality-gates gate is malformed,
+                                        has a duplicated rule_id, an
+                                        unknown severity or a
+                                        max_failed_ratio that is not a
+                                        JSON number in [0, 1]
+* ``UNKNOWN_QUALITY_GATE_SOURCE``     - quality-gates gate references a
+                                        rule that is not declared
 """
 
 from __future__ import annotations
@@ -129,6 +141,11 @@ from .origin_analysis import (
     UnknownOriginReferenceError,
     UnknownOriginTargetError,
     analyze_violation_origins,
+)
+from .quality_gates import (
+    InvalidQualityGateRuleError,
+    UnknownQualityGateSourceError,
+    evaluate_quality_gates,
 )
 from .reference_integrity import (
     InvalidReferenceInputError,
@@ -515,6 +532,44 @@ def _run_reference_integrity() -> int:
     return EXIT_OK
 
 
+def _run_quality_gates() -> int:
+    payload = _read_json_payload()
+    if payload is _PARSE_FAILED:
+        return EXIT_ERROR
+
+    if not isinstance(payload, dict):
+        return _emit_error(
+            "INVALID_INPUT", "input payload must be a JSON object"
+        )
+    for key in ("records", "rules", "gates"):
+        if key not in payload:
+            return _emit_error(
+                "INVALID_INPUT", f"payload is missing {key!r}"
+            )
+
+    try:
+        result = evaluate_quality_gates(
+            payload.get("dataset"),
+            payload["records"],
+            payload["rules"],
+            payload["gates"],
+        )
+    except InvalidRuleError as exc:
+        return _emit_error("INVALID_RULE", str(exc))
+    except InvalidInputError as exc:
+        return _emit_error("INVALID_INPUT", str(exc))
+    except InvalidQualityGateRuleError as exc:
+        return _emit_error("INVALID_QUALITY_GATE_RULE", str(exc))
+    except UnknownQualityGateSourceError as exc:
+        return _emit_error("UNKNOWN_QUALITY_GATE_SOURCE", str(exc))
+    except DataQualityError as exc:
+        return _emit_error(exc.code, str(exc))
+
+    json.dump(result, sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+    return EXIT_OK
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="dq",
@@ -606,6 +661,13 @@ def build_parser() -> argparse.ArgumentParser:
         "UTF-8 JSON object on standard input",
     )
     reference_integrity_parser.set_defaults(handler=_run_reference_integrity)
+
+    quality_gates_parser = subparsers.add_parser(
+        "quality-gates",
+        help="aggregate single-field rule failure ratios into dataset-level "
+        "quality gates from a UTF-8 JSON object on standard input",
+    )
+    quality_gates_parser.set_defaults(handler=_run_quality_gates)
     return parser
 
 

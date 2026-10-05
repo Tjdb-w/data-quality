@@ -18,6 +18,7 @@
 - 已实现：字段级质量影响分析（`analyze_field_impacts` 与命令行 `dq field-impact`）。
 - 已实现：两次快照的异常漂移对比（`compare_quality_snapshots` 与命令行 `dq snapshot-diff`）。
 - 已实现：跨数据集引用完整性校验（`validate_references` 与命令行 `dq reference-integrity`）。
+- 已实现：数据集级质量门槛（`evaluate_quality_gates` 与命令行 `dq quality-gates`）：以单字段规则为基础，按门槛汇总失败记录比例并给出异常样本。
 - 已实现：跨字段一致性规则（`register_composite_rules` / `evaluate_composite_rules` / `query_composite_results`，并经 `validate` 与命令行 `dq validate` / `dq query-results` 使用）。
 
 ## 安装
@@ -713,6 +714,62 @@ result = compare_quality_snapshots(payload)
 
 校验顺序为血缘图结构 → 两侧结果结构（含重复冲突）→ 两侧引用解析；结构错误先于未知引用错误。
 
+## 数据集级质量门槛
+
+数据集级门槛在既有单字段规则之上做比例汇总：规则定义与判定完全沿用 `validate`，不重新解释；门槛按 `source_rule_id` 引用一条已声明规则，汇总该规则的失败记录占比。
+
+```python
+from data_quality import evaluate_quality_gates
+
+report = evaluate_quality_gates(dataset, records, rules, gates)
+```
+
+- `dataset`：数据集标识，原样写入报告（可为 `null`）。
+- `records` / `rules`：与 `validate` 的输入相同；规则非法抛 `InvalidRuleError`，`records` 结构非法抛 `InvalidInputError`。
+- `gates`：门槛对象列表，按数组顺序汇总。每条门槛恰好含四键：
+  - `rule_id`：门槛自身唯一、非空的字符串标识；
+  - `source_rule_id`：非空字符串，必须引用 `rules` 中声明的规则 id；
+  - `max_failed_ratio`：0 到 1 之间的 JSON 数字（布尔不是数字）；
+  - `severity`：仅限 `error`、`warning`、`info`。
+
+### 汇总与判定
+
+对每条门槛，按 `source_rule_id` 收集对应规则的违反项：
+
+- `failed_count` 为违反项数，`record_count` 为记录数，`ratio = failed_count / record_count`；
+- `ratio <= max_failed_ratio` 判为 `PASSED`，否则 `FAILED`（等于门槛值算通过）；
+- `samples` 按记录顺序原样保留每个违反项的 `record_index`、`record_id`、`field`、`value`、`message`。
+
+`records` 为空时 `record_count` 为 0，状态为 `SKIPPED_EMPTY_DATASET`、`ratio` 为 `null`、`samples` 为空，不计成败。
+
+```json
+{
+  "dataset": "people",
+  "results": [
+    {
+      "rule_id": "age-gate",
+      "source_rule_id": "age-range",
+      "status": "FAILED",
+      "failed_count": 1,
+      "record_count": 3,
+      "ratio": 0.3333333333333333,
+      "samples": [
+        {"record_index": 0, "record_id": "r1", "field": "age", "value": 200, "message": "is out of the allowed range"}
+      ]
+    }
+  ]
+}
+```
+
+### 门槛错误
+
+以下情况抛出异常（均公开于 `data_quality`），不返回部分结果：
+
+- `InvalidQualityGateRuleError`（`ValueError` 子类，码 `INVALID_QUALITY_GATE_RULE`）：`gates` 不是列表、门槛不是对象、键缺失或多余、`rule_id` 为空或重复、`source_rule_id` 为空或非字符串、`severity` 非法，或 `max_failed_ratio` 不是 0–1 的 JSON 数字（含布尔）。
+- `UnknownQualityGateSourceError`（`LookupError` 子类，码 `UNKNOWN_QUALITY_GATE_SOURCE`）：`source_rule_id` 未在 `rules` 中声明。
+
+校验顺序为规则定义 → 门槛结构 → `source_rule_id` 引用解析 → 记录结构；规则/门槛定义先于记录检查。
+
 ## 命令行
 
 ### dq validate
@@ -975,6 +1032,35 @@ dq snapshot-diff < snapshots.json
 - `UNKNOWN_SNAPSHOT_REFERENCE`：任一侧结果引用了未声明的数据集或字段。
 
 除标准输入与标准输出外，不写文件、不访问外部服务。
+
+### dq quality-gates
+
+从标准输入读取一个 UTF-8 JSON 对象，必填 `records`、`rules`、`gates`，可选 `dataset`；规则与门槛契约与 `evaluate_quality_gates` 的 Python 输入完全相同：
+
+```bash
+dq quality-gates < gates.json
+```
+
+```json
+{
+  "dataset": "people",
+  "records": [{"id": "r1", "age": 200}, {"id": "r2", "age": 5}],
+  "rules": [
+    {"id": "age-range", "type": "range", "options": {"field": "age", "min": 0, "max": 120}}
+  ],
+  "gates": [
+    {"rule_id": "age-gate", "source_rule_id": "age-range", "max_failed_ratio": 0.1, "severity": "error"}
+  ]
+}
+```
+
+标准输出为与 Python 入口完全相同的一行 JSON 报告（`dataset`、`results`）。合法执行即使出现 `FAILED` 或 `SKIPPED_EMPTY_DATASET` 也退出 0；输入有误时退出码为 2，标准输出仅含顶层 `error` 对象（只有 `code`、`message` 两个键），错误码依次为：
+
+- `INVALID_JSON`：输入不是合法 UTF-8 或无法解析为 JSON。
+- `INVALID_INPUT`：载荷不是 JSON 对象、缺少 `records`/`rules`/`gates`，或 `records` 结构错误。
+- `INVALID_RULE`：单字段规则定义非法。
+- `INVALID_QUALITY_GATE_RULE`：门槛结构非法、`rule_id` 重复、`severity` 非法，或 `max_failed_ratio` 不是 0–1 的 JSON 数字。
+- `UNKNOWN_QUALITY_GATE_SOURCE`：门槛的 `source_rule_id` 未在 `rules` 中声明。
 
 ## 测试
 
