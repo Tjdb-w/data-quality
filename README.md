@@ -15,7 +15,7 @@
 - 已实现：异常样本跨规则关联定位（`correlate_violations` 与命令行 `dq correlate`）。
 - 已实现：跨数据集关联样本的异常关联定位（`correlate_linked_violations` 与命令行 `dq correlate-links`）。
 - 已实现：异常来源证据分析（`analyze_violation_origins` 与命令行 `dq violation-origins`）。
-- 已实现：字段级质量影响分析（`analyze_field_impacts`，Python API；命令行不变）。
+- 已实现：字段级质量影响分析（`analyze_field_impacts` 与命令行 `dq field-impact`）。
 - 已实现：跨字段一致性规则（`register_composite_rules` / `evaluate_composite_rules` / `query_composite_results`，并经 `validate` 与命令行 `dq validate` / `dq query-results` 使用）。
 
 ## 安装
@@ -834,6 +834,42 @@ dq violation-origins < origins.json
 - `INVALID_ORIGIN_INPUT`：`results`/`lineage`/`targets` 结构、标识、重复记录或边有误。
 - `UNKNOWN_ORIGIN_REFERENCE`：校验结果引用了未声明的数据集或字段。
 - `UNKNOWN_ORIGIN_TARGET`：目标没有对应的 `violated=true` 结果。
+
+除标准输入与标准输出外，不写文件、不访问外部服务。
+
+### dq field-impact
+
+从标准输入读取字段级质量影响分析的 UTF-8 JSON 对象（`datasets`、`lineageEdges`、`validationResults`、`anomalySamples`、`seedFields` 五个键缺一不可，也不可多）：
+
+```bash
+dq field-impact < impact.json
+```
+
+```json
+{
+  "datasets": {"ods": ["name"], "dwd": ["label"], "ads": ["label"]},
+  "lineageEdges": [
+    {"sourceDataset": "ods", "sourceField": "name",
+     "targetDataset": "dwd", "targetField": "label"},
+    {"sourceDataset": "dwd", "sourceField": "label",
+     "targetDataset": "ads", "targetField": "label"}
+  ],
+  "validationResults": [
+    {"ruleId": "r1", "status": "failed",
+     "fields": [{"dataset": "dwd", "field": "label"}],
+     "failedSampleIds": ["s1"]}
+  ],
+  "anomalySamples": {
+    "s1": {"dataset": "dwd", "fieldValues": {"label": "x"}}
+  },
+  "seedFields": [{"dataset": "ods", "field": "name"}]
+}
+```
+
+输出与 `analyze_field_impacts` 完全相同（`status`、`impacts`、`unresolvedReferences`）。合法输入退出码为 0；输入有误时退出码为 2 且 `message` 非空，错误码为：
+
+- `INVALID_JSON`：输入不是合法 UTF-8 或无法解析为 JSON。
+- `INVALID_IMPACT_INPUT`：载荷不是 JSON 对象，或五个顶层键的键集合、嵌套结构、字段引用、规则状态、样本映射不符合契约。
 
 除标准输入与标准输出外，不写文件、不访问外部服务。
 
