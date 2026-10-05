@@ -36,8 +36,10 @@ and explains the concrete field-level upstream/downstream paths.
 evaluated check results without re-running any rule.
 ``dq reference-integrity`` reads ``{"datasets": {...}, "rules": [...]}``
 where ``datasets`` maps dataset ids to record arrays and each rule is
-``{"rule_id", "source_dataset", "source_field", "target_dataset",
-"target_field"}``.
+either ``{"rule_id", "source_dataset", "source_field", "target_dataset",
+"target_field"}`` or, for composite business keys, ``{"rule_id",
+"source_dataset", "source_fields", "target_dataset", "target_fields"}``
+with equally long non-empty field arrays paired by position.
 ``dq quality-gates`` reads ``{"dataset": ..., "records": [...],
 "rules": [...], "gates": [...]}`` where each gate is
 ``{"rule_id", "source_rule_id", "max_failed_ratio", "severity"}``;
@@ -89,8 +91,10 @@ the process exits with status 2:
 * ``INVALID_REFERENCE_INPUT``         - reference-integrity datasets/rules
                                         structure or records are malformed
 * ``INVALID_REFERENCE_RULE``          - reference-integrity rule keys are
-                                        missing/extra, fields are empty or
-                                        rule_id is duplicated
+                                        missing/extra, the two rule shapes
+                                        are mixed, fields are empty, field
+                                        arrays are malformed or rule_id is
+                                        duplicated
 * ``UNKNOWN_REFERENCE_DATASET``       - reference-integrity rule names an
                                         undeclared dataset
 * ``INVALID_QUALITY_GATE_RULE``       - quality-gates gate is malformed,

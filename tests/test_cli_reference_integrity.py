@@ -137,5 +137,142 @@ class CliReferenceIntegrityErrorTest(unittest.TestCase):
         self.assert_error(proc, "UNKNOWN_REFERENCE_DATASET")
 
 
+class CliReferenceIntegrityCompositeTest(unittest.TestCase):
+    PAYLOAD = {
+        "datasets": {
+            "products": [
+                {"id": "p1", "tenant_id": "t1", "sku": "a"},
+                {"id": "p2", "tenant_id": "t2", "sku": "b"},
+            ],
+            "order_lines": [
+                {"id": "l1", "tenant": "t1", "sku": "a"},
+                {"id": "l2", "tenant": "t9", "sku": "a"},
+                {"id": "l3", "tenant": "t2"},
+                {"id": "l4", "tenant": None, "sku": None},
+            ],
+        },
+        "rules": [
+            {
+                "rule_id": "订单行-产品",
+                "source_dataset": "order_lines",
+                "source_fields": ["tenant", "sku"],
+                "target_dataset": "products",
+                "target_fields": ["tenant_id", "sku"],
+            }
+        ],
+    }
+
+    def test_composite_violation_output(self):
+        proc = run_json(self.PAYLOAD)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        body = json.loads(proc.stdout.decode("utf-8"))
+        self.assertEqual(
+            body,
+            {
+                "passed": False,
+                "summary": {
+                    "dataset_count": 2,
+                    "rule_count": 1,
+                    "checked_value_count": 3,
+                    "violation_count": 2,
+                },
+                "violations": [
+                    {
+                        "rule_id": "订单行-产品",
+                        "source": {
+                            "dataset": "order_lines",
+                            "record_index": 1,
+                            "record_id": "l2",
+                            "field": ["tenant", "sku"],
+                            "value": ["t9", "a"],
+                        },
+                        "target": {
+                            "dataset": "products",
+                            "field": ["tenant_id", "sku"],
+                        },
+                        "message": "has no matching target value",
+                    },
+                    {
+                        "rule_id": "订单行-产品",
+                        "source": {
+                            "dataset": "order_lines",
+                            "record_index": 2,
+                            "record_id": "l3",
+                            "field": ["tenant", "sku"],
+                            "value": ["t2", None],
+                        },
+                        "target": {
+                            "dataset": "products",
+                            "field": ["tenant_id", "sku"],
+                        },
+                        "message": "has an incomplete composite reference",
+                    },
+                ],
+            },
+        )
+
+    def test_composite_passed_output(self):
+        payload = {
+            "datasets": {
+                "products": [{"tenant_id": "t1", "sku": "a"}],
+                "order_lines": [{"tenant": "t1", "sku": "a"}, {}],
+            },
+            "rules": self.PAYLOAD["rules"],
+        }
+        proc = run_json(payload)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        body = json.loads(proc.stdout.decode("utf-8"))
+        self.assertTrue(body["passed"])
+        self.assertEqual(body["violations"], [])
+
+
+class CliReferenceIntegrityCompositeErrorTest(unittest.TestCase):
+    def assert_error(self, proc, code):
+        self.assertEqual(proc.returncode, 2, proc.stdout)
+        body = json.loads(proc.stdout.decode("utf-8"))
+        self.assertIn(code, body["error"]["code"])
+        self.assertIn("message", body["error"])
+
+    def composite_payload(self, rule):
+        return {"datasets": {}, "rules": [rule]}
+
+    def base_rule(self):
+        return {
+            "rule_id": "r1",
+            "source_dataset": "a",
+            "source_fields": ["f", "g"],
+            "target_dataset": "b",
+            "target_fields": ["h", "i"],
+        }
+
+    def test_mixed_rule_shape(self):
+        rule = self.base_rule()
+        rule["source_field"] = "f"
+        proc = run_json(self.composite_payload(rule))
+        self.assert_error(proc, "INVALID_REFERENCE_RULE")
+
+    def test_unequal_field_arrays(self):
+        rule = self.base_rule()
+        rule["target_fields"] = ["h"]
+        proc = run_json(self.composite_payload(rule))
+        self.assert_error(proc, "INVALID_REFERENCE_RULE")
+
+    def test_empty_field_array(self):
+        rule = self.base_rule()
+        rule["source_fields"] = []
+        proc = run_json(self.composite_payload(rule))
+        self.assert_error(proc, "INVALID_REFERENCE_RULE")
+
+    def test_duplicate_field_array_entries(self):
+        rule = self.base_rule()
+        rule["source_fields"] = ["f", "f"]
+        proc = run_json(self.composite_payload(rule))
+        self.assert_error(proc, "INVALID_REFERENCE_RULE")
+
+    def test_unknown_dataset(self):
+        proc = run_json(self.composite_payload(self.base_rule()))
+        self.assert_error(proc, "UNKNOWN_REFERENCE_DATASET")
+
+
 if __name__ == "__main__":
     unittest.main()
