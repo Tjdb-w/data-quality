@@ -42,6 +42,12 @@ from .lineage_paths import (
     explain_field_lineage_paths,
     explain_lineage_paths,
 )
+from .origin_analysis import (
+    InvalidOriginInputError,
+    UnknownOriginReferenceError,
+    UnknownOriginTargetError,
+    analyze_violation_origins,
+)
 from .validator import (
     InvalidInputError,
     InvalidRuleError,
@@ -57,6 +63,7 @@ __all__ = [
     "explain_field_lineage_paths",
     "correlate_violations",
     "correlate_linked_violations",
+    "analyze_violation_origins",
     "analyze_field_impacts",
     "register_composite_rules",
     "evaluate_composite_rules",
@@ -84,6 +91,9 @@ __all__ = [
     "UnknownCorrelationReferenceError",
     "InvalidLinkedCorrelationInputError",
     "UnknownLinkedCorrelationReferenceError",
+    "InvalidOriginInputError",
+    "UnknownOriginReferenceError",
+    "UnknownOriginTargetError",
 ]
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"

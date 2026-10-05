@@ -1,6 +1,7 @@
 """Command line interface: ``dq validate``, ``dq lineage``,
 ``dq field-lineage``, ``dq lineage-paths``, ``dq field-lineage-paths``,
-``dq correlate``, ``dq correlate-links``, ``dq query-results``.
+``dq correlate``, ``dq correlate-links``, ``dq violation-origins``,
+``dq query-results``.
 
 All subcommands read a UTF-8 JSON object from standard input and write a
 UTF-8 JSON result to standard output.
@@ -25,6 +26,8 @@ and explains the concrete field-level upstream/downstream paths.
 ``dq correlate`` reads ``{"results": [...], "lineage": {...}}``.
 ``dq correlate-links`` reads ``{"results": [...], "lineage": {...},
 "sample_links": [...]}``.
+``dq violation-origins`` reads ``{"results": [...], "lineage": {...},
+"targets": [...]}``.
 
 Error JSON has the shape ``{"error": {"code": ..., "message": ...}}`` and
 the process exits with status 2:
@@ -55,6 +58,12 @@ the process exits with status 2:
                                          malformed
 * ``UNKNOWN_LINKED_CORRELATION_REFERENCE`` - correlate-links sample link
                                             endpoint has no matching result
+* ``INVALID_ORIGIN_INPUT``            - violation-origins results/lineage/
+                                        targets are malformed
+* ``UNKNOWN_ORIGIN_REFERENCE``        - violation-origins result references
+                                        an undeclared dataset or field
+* ``UNKNOWN_ORIGIN_TARGET``           - violation-origins target has no
+                                        matching violated result
 """
 
 from __future__ import annotations
@@ -89,6 +98,12 @@ from .lineage_paths import (
     LineageNodeNotFoundError,
     explain_field_lineage_paths,
     explain_lineage_paths,
+)
+from .origin_analysis import (
+    InvalidOriginInputError,
+    UnknownOriginReferenceError,
+    UnknownOriginTargetError,
+    analyze_violation_origins,
 )
 from .validator import (
     DataQualityError,
@@ -372,6 +387,34 @@ def _run_correlate_links() -> int:
     return EXIT_OK
 
 
+def _run_violation_origins() -> int:
+    payload = _read_json_payload()
+    if payload is _PARSE_FAILED:
+        return EXIT_ERROR
+
+    if not isinstance(payload, dict):
+        return _emit_error(
+            "INVALID_ORIGIN_INPUT", "input payload must be a JSON object"
+        )
+
+    try:
+        result = analyze_violation_origins(
+            payload.get("results"),
+            payload.get("lineage"),
+            payload.get("targets"),
+        )
+    except InvalidOriginInputError as exc:
+        return _emit_error("INVALID_ORIGIN_INPUT", str(exc))
+    except UnknownOriginReferenceError as exc:
+        return _emit_error("UNKNOWN_ORIGIN_REFERENCE", str(exc))
+    except UnknownOriginTargetError as exc:
+        return _emit_error("UNKNOWN_ORIGIN_TARGET", str(exc))
+
+    json.dump(result, sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+    return EXIT_OK
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="dq",
@@ -427,6 +470,13 @@ def build_parser() -> argparse.ArgumentParser:
         "standard input",
     )
     correlate_links_parser.set_defaults(handler=_run_correlate_links)
+
+    violation_origins_parser = subparsers.add_parser(
+        "violation-origins",
+        help="analyze upstream/self origin and downstream impact evidence "
+        "of violated targets from a UTF-8 JSON object on standard input",
+    )
+    violation_origins_parser.set_defaults(handler=_run_violation_origins)
 
     query_results_parser = subparsers.add_parser(
         "query-results",

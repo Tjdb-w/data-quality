@@ -14,6 +14,7 @@
 - 已实现：血缘路径解释与影响范围查询（`explain_lineage_paths` / `explain_field_lineage_paths` 与命令行 `dq lineage-paths` / `dq field-lineage-paths`）。
 - 已实现：异常样本跨规则关联定位（`correlate_violations` 与命令行 `dq correlate`）。
 - 已实现：跨数据集关联样本的异常关联定位（`correlate_linked_violations` 与命令行 `dq correlate-links`）。
+- 已实现：异常来源证据分析（`analyze_violation_origins` 与命令行 `dq violation-origins`）。
 - 已实现：字段级质量影响分析（`analyze_field_impacts`，Python API；命令行不变）。
 - 已实现：跨字段一致性规则（`register_composite_rules` / `evaluate_composite_rules` / `query_composite_results`，并经 `validate` 与命令行 `dq validate` / `dq query-results` 使用）。
 
@@ -499,6 +500,65 @@ result = correlate_linked_violations(results, lineage, sample_links)
 
 校验顺序为血缘图结构 → 结果结构（含重复冲突）→ 结果引用解析 → sample_links 结构（含自链接/重复）→ 链接端点引用解析；结构错误先于未知引用错误。
 
+## 异常来源证据分析
+
+`analyze_violation_origins` 在规则校验、异常关联与字段血缘之上，为一批已确认的违规目标追溯同一样本内的来源证据（上游与自身违规）与影响证据（下游违规）。`results`、`lineage` 的结构、校验与去重语义完全沿用 `correlate_violations`，额外接收一份 `targets` 目标列表。
+
+```python
+from data_quality import analyze_violation_origins
+
+result = analyze_violation_origins(results, lineage, targets)
+```
+
+- `results` / `lineage`：与 `correlate_violations` 完全相同。
+- `targets`：目标对象列表，每个目标恰好含 `dataset_id`、`field_id`、`sample_id` 三个非空字符串键；目标按三键定位一条 `violated=true` 的结果，找不到（含仅有通过结果）抛出 `UnknownOriginTargetError`。
+- 证据只取与目标**同一样本**的违规结果；其他样本、通过结果与无血缘关系的字段不参与。
+
+### 来源与影响证据
+
+- `originEvidence`：目标字段自身的违规，以及位于目标上游（可沿正向边到达目标）字段的同一样本违规；`path` 从证据字段正向延伸到目标字段，自身证据的路径只含目标字段一项。
+- `impactEvidence`：从目标沿正向边可达的**非目标**字段上的同一样本违规；`path` 从目标字段正向延伸到证据字段；目标字段上的自环不会让目标成为自己的影响证据。
+- 每条 `path` 均为 `{"dataset_id", "field_id"}` 项组成的最短（边数最少）正向链；同长时按完整字段序列字典序取最小。
+- 证据项恰好含 `rule_id`、`dataset_id`、`field_id`、`sample_id`、`violated`、`value`、`path` 七键；同一字段上的多条违规规则各自成为一条证据。
+- 证据按 `path` 长度、`dataset_id`、`field_id`、`rule_id` 排序；无证据时对应列表为空。
+
+### 来源证据返回结果
+
+```json
+{
+  "reports": [
+    {
+      "target": {"dataset_id": "dwd", "field_id": "label", "sample_id": "样本-1"},
+      "originEvidence": [
+        {
+          "rule_id": "r2",
+          "dataset_id": "dwd",
+          "field_id": "label",
+          "sample_id": "样本-1",
+          "violated": true,
+          "value": "bad",
+          "path": [{"dataset_id": "dwd", "field_id": "label"}]
+        }
+      ],
+      "impactEvidence": []
+    }
+  ]
+}
+```
+
+- `reports` 与 `targets` 一一对应并保持其顺序；空 `targets` 返回 `{"reports": []}`。
+- 相同输入始终得到完全相同的结果，不修改输入。
+
+### 来源证据错误
+
+以下情况抛出异常（均公开于 `data_quality`），且不返回部分结果：
+
+- `InvalidOriginInputError`（`ValueError` 子类，码 `INVALID_ORIGIN_INPUT`）：`results`/`lineage`/`targets` 结构有误、标识为空、重复记录内容冲突、边非法或矛盾。
+- `UnknownOriginReferenceError`（`LookupError` 子类，码 `UNKNOWN_ORIGIN_REFERENCE`）：校验结果引用了未声明的数据集或字段。
+- `UnknownOriginTargetError`（`LookupError` 子类，码 `UNKNOWN_ORIGIN_TARGET`）：目标没有对应的 `violated=true` 结果。
+
+校验顺序为血缘图结构 → 结果结构（含重复冲突）→ targets 结构 → 结果引用解析 → 逐目标违规定位。
+
 ## 字段级质量影响分析
 
 `analyze_field_impacts` 在既有规则校验、异常定位与字段血缘之上，从一批种子字段出发，分析每个种子沿有向血缘边可达的下游字段，以及落在这些下游字段上的非通过规则与可定位异常样本。
@@ -735,6 +795,45 @@ dq correlate-links < correlate-links.json
 - `UNKNOWN_CORRELATION_REFERENCE`：校验结果引用了未声明的数据集或字段。
 - `INVALID_LINKED_CORRELATION_INPUT`：`sample_links` 结构、标识有误，或存在自链接、重复关系。
 - `UNKNOWN_LINKED_CORRELATION_REFERENCE`：链接端点在 `results` 中找不到相同 `dataset_id` + `sample_id` 的结果。
+
+除标准输入与标准输出外，不写文件、不访问外部服务。
+
+### dq violation-origins
+
+从标准输入读取异常来源证据分析的 UTF-8 JSON 对象（`results`、`lineage`、`targets` 均必填）：
+
+```bash
+dq violation-origins < origins.json
+```
+
+其中 `results`、`lineage` 与 `dq correlate` 完全相同；`targets` 为目标列表，每个目标恰好含 `dataset_id`、`field_id`、`sample_id` 三个非空字符串键：
+
+```json
+{
+  "results": [
+    {"rule_id": "r1", "dataset_id": "ods", "field_id": "name", "sample_id": "a", "violated": true, "value": "x"},
+    {"rule_id": "r2", "dataset_id": "dwd", "field_id": "label", "sample_id": "a", "violated": true, "value": "y"}
+  ],
+  "lineage": {
+    "datasets": ["ods", "dwd"],
+    "fields": {"ods": ["name"], "dwd": ["label"]},
+    "edges": [
+      {"source": {"dataset": "dwd", "field": "label"},
+       "target": {"dataset": "ods", "field": "name"}, "type": "upstream"}
+    ]
+  },
+  "targets": [
+    {"dataset_id": "dwd", "field_id": "label", "sample_id": "a"}
+  ]
+}
+```
+
+合法输入退出码为 0 并输出上述来源/影响证据报告（`reports`，与 `targets` 同序）；输入有误时退出码为 2 且 `message` 非空，错误码依次为：
+
+- `INVALID_JSON`：输入不是合法 UTF-8 或无法解析为 JSON。
+- `INVALID_ORIGIN_INPUT`：`results`/`lineage`/`targets` 结构、标识、重复记录或边有误。
+- `UNKNOWN_ORIGIN_REFERENCE`：校验结果引用了未声明的数据集或字段。
+- `UNKNOWN_ORIGIN_TARGET`：目标没有对应的 `violated=true` 结果。
 
 除标准输入与标准输出外，不写文件、不访问外部服务。
 
