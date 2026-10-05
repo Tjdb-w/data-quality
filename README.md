@@ -16,6 +16,7 @@
 - 已实现：跨数据集关联样本的异常关联定位（`correlate_linked_violations` 与命令行 `dq correlate-links`）。
 - 已实现：异常来源证据分析（`analyze_violation_origins` 与命令行 `dq violation-origins`）。
 - 已实现：字段级质量影响分析（`analyze_field_impacts` 与命令行 `dq field-impact`）。
+- 已实现：两次快照的异常漂移对比（`compare_quality_snapshots` 与命令行 `dq snapshot-diff`）。
 - 已实现：跨字段一致性规则（`register_composite_rules` / `evaluate_composite_rules` / `query_composite_results`，并经 `validate` 与命令行 `dq validate` / `dq query-results` 使用）。
 
 ## 安装
@@ -631,6 +632,86 @@ result = analyze_field_impacts(payload)
 
 命令行 `dq field-impact` 下，`ImpactInputError` 统一映射为错误码 `INVALID_IMPACT_INPUT`（退出码 2）；无法解析为 UTF-8 JSON 时仍为 `INVALID_JSON`，不返回部分结果。
 
+## 两次快照的异常漂移对比
+
+`compare_quality_snapshots` 在既有校验结果与字段血缘之上，消费两次已经评估完成的快照（`baseline` 与 `current`），只比较其中 `violated=true` 的异常，不重跑任何规则、不修改输入，仅经返回值（命令行经标准输出）给出结果。
+
+```python
+from data_quality import compare_quality_snapshots
+
+result = compare_quality_snapshots(payload)
+```
+
+- `payload`：恰好包含 `baseline`、`current`、`lineage` 三个顶层键（键多余或缺失均抛错）。
+  - `baseline` / `current`：恰好含 `results` 一个键的对象；其中结果列表完全沿用 `correlate_violations` 的契约（六键、非空字符串标识、布尔 `violated`、任意 JSON `value`、同规则同样本重复且内容冲突时报错）。通过结果只参与引用校验，不参与漂移比较。
+  - `lineage`：两侧共享的一张字段血缘图，结构与 `correlate_violations` 完全相同。
+- 异常身份为 `(rule_id, dataset_id, field_id, sample_id)` 四元组：
+  - `new`：仅 `current` 出现；
+  - `resolved`：仅 `baseline` 出现；
+  - `persisted`：两侧共有。
+- 比较只解释已有结果，不产生任何文件或外部访问；相同输入始终得到完全相同的结果。
+
+### 漂移对比返回结果
+
+```json
+{
+  "status": "ok",
+  "summary": {
+    "baseline_violation_count": 1,
+    "current_violation_count": 2,
+    "new_count": 1,
+    "resolved_count": 0,
+    "persistent_count": 1
+  },
+  "changes": [
+    {
+      "state": "persisted",
+      "rule_id": "r1",
+      "dataset_id": "ods",
+      "field_id": "name",
+      "sample_id": "s1",
+      "baseline_value": "x",
+      "current_value": "y",
+      "upstream_changes": [],
+      "paths": []
+    },
+    {
+      "state": "new",
+      "rule_id": "r2",
+      "dataset_id": "dwd",
+      "field_id": "label",
+      "sample_id": "s1",
+      "baseline_value": null,
+      "current_value": "bad",
+      "upstream_changes": [
+        {"rule_id": "r1", "dataset_id": "ods", "field_id": "name", "sample_id": "s1"}
+      ],
+      "paths": [
+        [
+          {"dataset_id": "ods", "field_id": "name"},
+          {"dataset_id": "dwd", "field_id": "label"}
+        ]
+      ]
+    }
+  ]
+}
+```
+
+- 顶层 `status` 恒为 `"ok"`；`changes` 按身份四元组字典序排列。
+- 每个 change 恰好含 `state`、`rule_id`、`dataset_id`、`field_id`、`sample_id`、`baseline_value`、`current_value`、`upstream_changes`、`paths` 九键；缺失侧的 value 为 `null`，`persisted` 保留两侧原值（布尔不与数字按 JSON 相等判同）。
+- `upstream_changes` 只含**同一 `sample_id`** 下、沿 lineage 正向边从证据字段可达目标字段（目标的上游）且**值发生变化**的其他 new / resolved / persisted 异常：new、resolved 只有一侧值，其出现或消失即为值变化；persisted 仅当两侧 value 按 JSON 相等不一致时计入。目标自身与仅经自环可达的同字段异常排除在外。
+- `paths` 与 `upstream_changes` 严格同序，每项为证据字段到目标字段的最短字段序列（两端都含、至少一条边）；等长时取完整字段序列字典序最小者，路径项为 `{"dataset_id", "field_id"}`。
+- 两侧均无违规时 `changes` 为空、各计数为 0。
+
+### 漂移对比错误
+
+以下情况抛出异常（均公开于 `data_quality`），不返回部分结果：
+
+- `InvalidSnapshotInputError`（`ValueError` 子类，码 `INVALID_SNAPSHOT_INPUT`）：顶层不是对象或三键不齐、快照不是恰好含 `results` 的对象、两侧结果或血缘图结构非法（含标识为空、重复冲突、非法/矛盾边等，语义与 `correlate` 一致）。
+- `UnknownSnapshotReferenceError`（`LookupError` 子类，码 `UNKNOWN_SNAPSHOT_REFERENCE`）：任一侧结果引用了血缘图未声明的数据集或字段。
+
+校验顺序为血缘图结构 → 两侧结果结构（含重复冲突）→ 两侧引用解析；结构错误先于未知引用错误。
+
 ## 命令行
 
 ### dq validate
@@ -853,6 +934,46 @@ dq field-impact < field-impact.json
 - `INVALID_IMPACT_INPUT`：顶层不是对象，或五个顶层键的嵌套结构、键集合、字段引用、规则状态、样本映射不符合公开契约。
 
 出错时仅输出 `{"error": {"code": ..., "message": ...}}`，不返回部分结果。除标准输入与标准输出外，不写文件、不访问外部服务。
+
+### dq snapshot-diff
+
+从标准输入读取两次快照异常漂移对比的 UTF-8 JSON 对象，`baseline`、`current`、`lineage` 三个顶层键均必填（键多余或缺失均报错）；契约与 `compare_quality_snapshots` 的 Python 输入完全相同：
+
+```bash
+dq snapshot-diff < snapshots.json
+```
+
+```json
+{
+  "baseline": {
+    "results": [
+      {"rule_id": "r1", "dataset_id": "ods", "field_id": "name", "sample_id": "a", "violated": true, "value": "x"}
+    ]
+  },
+  "current": {
+    "results": [
+      {"rule_id": "r1", "dataset_id": "ods", "field_id": "name", "sample_id": "a", "violated": true, "value": "y"},
+      {"rule_id": "r2", "dataset_id": "dwd", "field_id": "label", "sample_id": "a", "violated": true, "value": "bad"}
+    ]
+  },
+  "lineage": {
+    "datasets": ["ods", "dwd"],
+    "fields": {"ods": ["name"], "dwd": ["label"]},
+    "edges": [
+      {"source": {"dataset": "dwd", "field": "label"},
+       "target": {"dataset": "ods", "field": "name"}, "type": "upstream"}
+    ]
+  }
+}
+```
+
+合法输入退出码为 0，标准输出只写一行与 `compare_quality_snapshots` 完全相同的结果 JSON（`status`、`summary`、`changes`；异常分类、值保留、上游漂移证据与最短路径等语义均不改变），不重跑规则。输入有误时退出码为 2 且 `message` 非空，标准输出仅含顶层 `error` 对象（只有 `code`、`message` 两个键），错误码依次为：
+
+- `INVALID_JSON`：输入不是合法 UTF-8 或无法解析为 JSON。
+- `INVALID_SNAPSHOT_INPUT`：快照、结果或血缘结构、标识、重复记录或边有误。
+- `UNKNOWN_SNAPSHOT_REFERENCE`：任一侧结果引用了未声明的数据集或字段。
+
+除标准输入与标准输出外，不写文件、不访问外部服务。
 
 ## 测试
 

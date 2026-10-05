@@ -1,7 +1,7 @@
 """Command line interface: ``dq validate``, ``dq lineage``,
 ``dq field-lineage``, ``dq lineage-paths``, ``dq field-lineage-paths``,
 ``dq correlate``, ``dq correlate-links``, ``dq violation-origins``,
-``dq field-impact``, ``dq query-results``.
+``dq field-impact``, ``dq query-results``, ``dq snapshot-diff``.
 
 All subcommands read a UTF-8 JSON object from standard input and write a
 UTF-8 JSON result to standard output.
@@ -30,6 +30,9 @@ and explains the concrete field-level upstream/downstream paths.
 "targets": [...]}``.
 ``dq field-impact`` reads ``{"datasets": {...}, "lineageEdges": [...],
 "validationResults": [...], "anomalySamples": {...}, "seedFields": [...]}``.
+``dq snapshot-diff`` reads ``{"baseline": {"results": [...]},
+"current": {"results": [...]}, "lineage": {...}}`` and consumes already
+evaluated check results without re-running any rule.
 
 Error JSON has the shape ``{"error": {"code": ..., "message": ...}}`` and
 the process exits with status 2:
@@ -69,6 +72,10 @@ the process exits with status 2:
 * ``INVALID_IMPACT_INPUT``            - field-impact payload structure, key
                                         set, references, rule statuses or
                                         sample mapping is malformed
+* ``INVALID_SNAPSHOT_INPUT``          - snapshot-diff snapshots/results/
+                                        lineage are malformed
+* ``UNKNOWN_SNAPSHOT_REFERENCE``      - snapshot-diff result references an
+                                        undeclared dataset or field
 """
 
 from __future__ import annotations
@@ -110,6 +117,11 @@ from .origin_analysis import (
     UnknownOriginReferenceError,
     UnknownOriginTargetError,
     analyze_violation_origins,
+)
+from .snapshot_diff import (
+    InvalidSnapshotInputError,
+    UnknownSnapshotReferenceError,
+    compare_quality_snapshots,
 )
 from .validator import (
     DataQualityError,
@@ -436,6 +448,28 @@ def _run_field_impact() -> int:
     return EXIT_OK
 
 
+def _run_snapshot_diff() -> int:
+    payload = _read_json_payload()
+    if payload is _PARSE_FAILED:
+        return EXIT_ERROR
+
+    if not isinstance(payload, dict):
+        return _emit_error(
+            "INVALID_SNAPSHOT_INPUT", "input payload must be a JSON object"
+        )
+
+    try:
+        result = compare_quality_snapshots(payload)
+    except InvalidSnapshotInputError as exc:
+        return _emit_error("INVALID_SNAPSHOT_INPUT", str(exc))
+    except UnknownSnapshotReferenceError as exc:
+        return _emit_error("UNKNOWN_SNAPSHOT_REFERENCE", str(exc))
+
+    json.dump(result, sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+    return EXIT_OK
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="dq",
@@ -512,6 +546,14 @@ def build_parser() -> argparse.ArgumentParser:
         "or record locator from a UTF-8 JSON object on standard input",
     )
     query_results_parser.set_defaults(handler=_run_query_results)
+
+    snapshot_diff_parser = subparsers.add_parser(
+        "snapshot-diff",
+        help="compare violated results of two quality check snapshots over "
+        "the shared lineage graph from a UTF-8 JSON object on standard "
+        "input",
+    )
+    snapshot_diff_parser.set_defaults(handler=_run_snapshot_diff)
     return parser
 
 
