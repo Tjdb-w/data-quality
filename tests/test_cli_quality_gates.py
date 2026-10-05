@@ -42,12 +42,33 @@ def gate(
     }
 
 
-def payload(records, gates, dataset="people", rules=None):
-    return {
+def payload(records, gates, dataset="people", rules=None, exemptions=None):
+    obj = {
         "dataset": dataset,
         "records": records,
         "rules": [RULE] if rules is None else rules,
         "gates": gates,
+    }
+    if exemptions is not None:
+        obj["exemptions"] = exemptions
+    return obj
+
+
+def exemption(
+    exemption_id="e1",
+    rule_id="age-range",
+    record_index=0,
+    record_id="r1",
+    field="age",
+    reason="known legacy value",
+):
+    return {
+        "exemption_id": exemption_id,
+        "rule_id": rule_id,
+        "record_index": record_index,
+        "record_id": record_id,
+        "field": field,
+        "reason": reason,
     }
 
 
@@ -188,6 +209,98 @@ class CliQualityGatesErrorTest(unittest.TestCase):
         self.assert_error(
             run_json(payload([], [gate(source_rule_id="nope")])),
             "UNKNOWN_QUALITY_GATE_SOURCE",
+        )
+
+
+class CliQualityGatesExemptionTest(unittest.TestCase):
+    def assert_error(self, proc, code):
+        self.assertEqual(proc.returncode, 2, proc.stdout)
+        body = json.loads(proc.stdout.decode("utf-8"))
+        self.assertEqual(body["error"]["code"], code)
+        self.assertIn("message", body["error"])
+
+    def test_omitted_exemptions_keep_baseline_shape(self):
+        records = [{"id": "r1", "age": 200}, {"id": "r2", "age": 5}]
+        proc = run_json(payload(records, [gate(max_failed_ratio=0.1)]))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        body = json.loads(proc.stdout.decode("utf-8"))
+        entry = body["results"][0]
+        self.assertEqual(entry["failed_count"], 1)
+        self.assertNotIn("waived_count", entry)
+        self.assertNotIn("waived_samples", entry)
+
+    def test_waived_violation_flips_failed_to_passed(self):
+        records = [{"id": "r1", "age": 200}, {"id": "r2", "age": 5}]
+        proc = run_json(
+            payload(
+                records,
+                [gate(max_failed_ratio=0.1)],
+                exemptions=[exemption()],
+            )
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        body = json.loads(proc.stdout.decode("utf-8"))
+        entry = body["results"][0]
+        self.assertEqual(entry["status"], "PASSED")
+        self.assertEqual(entry["failed_count"], 0)
+        self.assertEqual(entry["ratio"], 0.0)
+        self.assertEqual(entry["samples"], [])
+        self.assertEqual(entry["waived_count"], 1)
+        self.assertEqual(
+            entry["waived_samples"][0],
+            {
+                "record_index": 0,
+                "record_id": "r1",
+                "field": "age",
+                "value": 200,
+                "message": "is out of the allowed range",
+                "exemption_id": "e1",
+                "reason": "known legacy value",
+            },
+        )
+
+    def test_bad_exemption_is_invalid_exemption_input(self):
+        records = [{"id": "r1", "age": 200}, {"id": "r2", "age": 5}]
+        bad = exemption()
+        bad["record_index"] = True
+        self.assert_error(
+            run_json(
+                payload(
+                    records,
+                    [gate(max_failed_ratio=0.1)],
+                    exemptions=[bad],
+                )
+            ),
+            "INVALID_EXEMPTION_INPUT",
+        )
+
+    def test_unmatched_exemption_is_invalid_exemption_input(self):
+        records = [{"id": "r1", "age": 200}, {"id": "r2", "age": 5}]
+        self.assert_error(
+            run_json(
+                payload(
+                    records,
+                    [gate(max_failed_ratio=0.1)],
+                    exemptions=[exemption(record_index=1, record_id="r2")],
+                )
+            ),
+            "INVALID_EXEMPTION_INPUT",
+        )
+
+    def test_duplicate_conflict_is_invalid_exemption_input(self):
+        records = [{"id": "r1", "age": 200}, {"id": "r2", "age": 5}]
+        self.assert_error(
+            run_json(
+                payload(
+                    records,
+                    [gate(max_failed_ratio=0.1)],
+                    exemptions=[
+                        exemption("e1"),
+                        exemption("e2", reason="other"),
+                    ],
+                )
+            ),
+            "INVALID_EXEMPTION_INPUT",
         )
 
 

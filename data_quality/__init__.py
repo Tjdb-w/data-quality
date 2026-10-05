@@ -21,6 +21,10 @@ from .correlation import (
     correlate_linked_violations,
     correlate_violations,
 )
+from .exemptions import (
+    InvalidExemptionError,
+    apply_violation_exemptions,
+)
 from .field_impact import (
     ImpactInputError,
     analyze_field_impacts,
@@ -84,6 +88,7 @@ __all__ = [
     "compare_quality_snapshots",
     "validate_references",
     "evaluate_quality_gates",
+    "apply_violation_exemptions",
     "register_composite_rules",
     "evaluate_composite_rules",
     "query_composite_results",
@@ -120,6 +125,7 @@ __all__ = [
     "UnknownReferenceDatasetError",
     "InvalidQualityGateRuleError",
     "UnknownQualityGateSourceError",
+    "InvalidExemptionError",
 ]
 
 __version__ = "0.9.0"

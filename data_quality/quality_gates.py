@@ -35,6 +35,10 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
+from .exemptions import (
+    InvalidExemptionError,
+    apply_violation_exemptions,
+)
 from .validator import (
     InvalidInputError,
     _check_rule,
@@ -46,6 +50,7 @@ __all__ = [
     "evaluate_quality_gates",
     "InvalidQualityGateRuleError",
     "UnknownQualityGateSourceError",
+    "InvalidExemptionError",
     "GATE_SEVERITIES",
     "STATUS_PASSED",
     "STATUS_FAILED",
@@ -139,11 +144,19 @@ def _to_sample(violation: Dict[str, Any]) -> Dict[str, Any]:
     return {key: violation[key] for key in _SAMPLE_KEYS}
 
 
+def _to_waived_sample(violation: Dict[str, Any]) -> Dict[str, Any]:
+    sample = _to_sample(violation)
+    sample["exemption_id"] = violation["exemption_id"]
+    sample["reason"] = violation["reason"]
+    return sample
+
+
 def evaluate_quality_gates(
     dataset: Any,
     records: Any,
     rules: Any,
     gates: Any,
+    exemptions: Any = None,
 ) -> Dict[str, Any]:
     """Aggregate single-field rule failure ratios into dataset gates.
 
@@ -160,20 +173,37 @@ def evaluate_quality_gates(
         in ``[0, 1]``, never boolean) and ``severity`` (one of
         ``error`` / ``warning`` / ``info``). Gates are aggregated in
         array order.
+    :param exemptions: optional list of exemption objects as accepted by
+        :func:`data_quality.apply_violation_exemptions`. Exemptions are
+        matched against the single-field violations using the same rules
+        (exact ``rule_id`` / ``record_index`` / ``record_id`` /
+        ``field`` match; invalid, duplicated, conflicting or unmatched
+        exemptions raise :class:`InvalidExemptionError`). When omitted or
+        empty the report is identical to the baseline shape; when
+        supplied, ``failed_count``, ``ratio`` and ``samples`` count only
+        active violations and each result additionally carries
+        ``waived_count`` and ``waived_samples`` (the original sample keys
+        plus ``exemption_id`` and ``reason``).
     :returns: ``{"dataset": dataset, "results": [...]}`` where each
         result carries ``rule_id``, ``source_rule_id``, ``status``,
-        ``failed_count``, ``record_count``, ``ratio`` and ``samples``.
+        ``failed_count``, ``record_count``, ``ratio`` and ``samples``,
+        plus ``waived_count`` and ``waived_samples`` when exemptions are
+        supplied.
         ``status`` is ``PASSED`` when ``ratio <= max_failed_ratio`` and
         ``FAILED`` otherwise. Each sample keeps the violating record's
         ``record_index``, ``record_id``, ``field``, ``value`` and
-        ``message`` in record order. An empty dataset yields
-        ``SKIPPED_EMPTY_DATASET`` with ``record_count`` 0, ``ratio``
-        ``None`` and empty samples and is neither passed nor failed.
+        ``message`` in record order; waived samples keep the same keys
+        and additionally carry ``exemption_id`` and ``reason``. An empty
+        dataset yields ``SKIPPED_EMPTY_DATASET`` with ``record_count`` 0,
+        ``ratio`` ``None`` and empty samples and is neither passed nor
+        failed.
     :raises ValueError: :class:`~data_quality.validator.InvalidInputError`
         on malformed records,
         :class:`~data_quality.validator.InvalidRuleError` on malformed
-        rule definitions and :class:`InvalidQualityGateRuleError` on
-        malformed gates, duplicated gate ids or illegal severity / ratio.
+        rule definitions, :class:`InvalidQualityGateRuleError` on
+        malformed gates, duplicated gate ids or illegal severity / ratio
+        and :class:`InvalidExemptionError` on malformed, duplicated,
+        conflicting or unmatched exemptions.
     :raises LookupError: :class:`UnknownQualityGateSourceError` when a
         gate names a rule that ``rules`` does not declare.
     """
@@ -199,16 +229,37 @@ def evaluate_quality_gates(
             )
 
     record_count = len(records)
+    # Omitted or empty exemptions are indistinguishable: both keep the
+    # historical report shape byte-for-byte.
+    use_exemptions = bool(exemptions)
 
-    violations_by_rule: Dict[str, List[Dict[str, Any]]] = {}
+    all_violations: List[Dict[str, Any]] = []
     if record_count:
-        all_violations: List[Dict[str, Any]] = []
         for rule in compiled_rules:
             _check_rule(rule, records, all_violations)
-        for violation in all_violations:
-            violations_by_rule.setdefault(violation["rule_id"], []).append(
-                violation
-            )
+
+    if use_exemptions:
+        # Apply the shared exemption rules once over every
+        # single-field violation before the per-gate aggregation. An
+        # empty dataset validates the exemptions too, so any exemption
+        # is then reported as unmatched.
+        exemption_result = apply_violation_exemptions(
+            {"violations": all_violations}, exemptions
+        )
+        active_violations = exemption_result["active_violations"]
+        waived_violations = exemption_result["waived_violations"]
+    else:
+        active_violations = all_violations
+        waived_violations = []
+
+    violations_by_rule: Dict[str, List[Dict[str, Any]]] = {}
+    waived_by_rule: Dict[str, List[Dict[str, Any]]] = {}
+    for violation in active_violations:
+        violations_by_rule.setdefault(violation["rule_id"], []).append(
+            violation
+        )
+    for violation in waived_violations:
+        waived_by_rule.setdefault(violation["rule_id"], []).append(violation)
 
     results: List[Dict[str, Any]] = []
     for gate in validated_gates:
@@ -226,16 +277,25 @@ def evaluate_quality_gates(
             else:
                 status = STATUS_FAILED
 
-        results.append(
-            {
-                "rule_id": gate["rule_id"],
-                "source_rule_id": gate["source_rule_id"],
-                "status": status,
-                "failed_count": failed_count,
-                "record_count": record_count,
-                "ratio": ratio,
-                "samples": samples,
-            }
-        )
+        entry = {
+            "rule_id": gate["rule_id"],
+            "source_rule_id": gate["source_rule_id"],
+            "status": status,
+            "failed_count": failed_count,
+            "record_count": record_count,
+            "ratio": ratio,
+            "samples": samples,
+        }
+        if use_exemptions:
+            waived_samples = [
+                _to_waived_sample(violation)
+                for violation in waived_by_rule.get(
+                    gate["source_rule_id"], []
+                )
+            ]
+            entry["waived_count"] = len(waived_samples)
+            entry["waived_samples"] = waived_samples
+
+        results.append(entry)
 
     return {"dataset": dataset, "results": results}

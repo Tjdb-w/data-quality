@@ -19,6 +19,7 @@
 - 已实现：两次快照的异常漂移对比（`compare_quality_snapshots` 与命令行 `dq snapshot-diff`）。
 - 已实现：跨数据集引用完整性校验（`validate_references` 与命令行 `dq reference-integrity`）。
 - 已实现：数据集级质量门槛（`evaluate_quality_gates` 与命令行 `dq quality-gates`）：以单字段规则为基础，按门槛汇总失败记录比例并给出异常样本。
+- 已实现：单字段异常人工豁免（`apply_violation_exemptions` 与命令行 `dq exemptions`）：将 `validate` 结果中的异常按豁免精确拆分为未豁免与已豁免，不落盘、不改变既有规则与结果；质量门槛可选用同一套豁免规则。
 - 已实现：跨字段一致性规则（`register_composite_rules` / `evaluate_composite_rules` / `query_composite_results`，并经 `validate` 与命令行 `dq validate` / `dq query-results` 使用）。
 
 ## 安装
@@ -722,6 +723,8 @@ result = compare_quality_snapshots(payload)
 from data_quality import evaluate_quality_gates
 
 report = evaluate_quality_gates(dataset, records, rules, gates)
+# 可选第五个参数 exemptions，契约与 apply_violation_exemptions 相同：
+report = evaluate_quality_gates(dataset, records, rules, gates, exemptions)
 ```
 
 - `dataset`：数据集标识，原样写入报告（可为 `null`）。
@@ -731,16 +734,19 @@ report = evaluate_quality_gates(dataset, records, rules, gates)
   - `source_rule_id`：非空字符串，必须引用 `rules` 中声明的规则 id；
   - `max_failed_ratio`：0 到 1 之间的 JSON 数字（布尔不是数字）；
   - `severity`：仅限 `error`、`warning`、`info`。
+- `exemptions`：可选豁免列表（见下一节）。省略或为空列表时报告与基线逐字段相同；提供时豁免在全部单字段异常上统一按同一套规则校验与匹配。
 
 ### 汇总与判定
 
 对每条门槛，按 `source_rule_id` 收集对应规则的违反项：
 
-- `failed_count` 为违反项数，`record_count` 为记录数，`ratio = failed_count / record_count`；
+- `failed_count` 为未豁免违反项数，`record_count` 为记录数，`ratio = failed_count / record_count`；
 - `ratio <= max_failed_ratio` 判为 `PASSED`，否则 `FAILED`（等于门槛值算通过）；
-- `samples` 按记录顺序原样保留每个违反项的 `record_index`、`record_id`、`field`、`value`、`message`。
+- `samples` 按记录顺序原样保留每个未豁免违反项的 `record_index`、`record_id`、`field`、`value`、`message`。
 
-`records` 为空时 `record_count` 为 0，状态为 `SKIPPED_EMPTY_DATASET`、`ratio` 为 `null`、`samples` 为空，不计成败。
+提供 `exemptions` 时，`failed_count`、`ratio`、`samples` 只统计未豁免异常；每条门槛另给 `waived_count` 与 `waived_samples`，后者保留原样例的五个键并附加 `exemption_id`、`reason`。省略或传入空列表时不输出这两个键，报告与基线完全相同。
+
+`records` 为空时 `record_count` 为 0，状态为 `SKIPPED_EMPTY_DATASET`、`ratio` 为 `null`、`samples` 为空，不计成败（提供非空豁免时因无异常可匹配，按豁免错误处理）。
 
 ```json
 {
@@ -755,7 +761,9 @@ report = evaluate_quality_gates(dataset, records, rules, gates)
       "ratio": 0.3333333333333333,
       "samples": [
         {"record_index": 0, "record_id": "r1", "field": "age", "value": 200, "message": "is out of the allowed range"}
-      ]
+      ],
+      "waived_count": 0,
+      "waived_samples": []
     }
   ]
 }
@@ -767,8 +775,63 @@ report = evaluate_quality_gates(dataset, records, rules, gates)
 
 - `InvalidQualityGateRuleError`（`ValueError` 子类，码 `INVALID_QUALITY_GATE_RULE`）：`gates` 不是列表、门槛不是对象、键缺失或多余、`rule_id` 为空或重复、`source_rule_id` 为空或非字符串、`severity` 非法，或 `max_failed_ratio` 不是 0–1 的 JSON 数字（含布尔）。
 - `UnknownQualityGateSourceError`（`LookupError` 子类，码 `UNKNOWN_QUALITY_GATE_SOURCE`）：`source_rule_id` 未在 `rules` 中声明。
+- `InvalidExemptionError`（`ValueError` 子类，码 `INVALID_EXEMPTION_INPUT`）：豁免无效、重复、冲突或未匹配到异常。
 
-校验顺序为规则定义 → 门槛结构 → `source_rule_id` 引用解析 → 记录结构；规则/门槛定义先于记录检查。
+校验顺序为规则定义 → 门槛结构 → `source_rule_id` 引用解析 → 记录结构 → 豁免校验与匹配；规则/门槛定义先于记录检查。
+
+## 单字段异常豁免
+
+人工豁免只作用于 `validate` 产出的**单字段**异常：规则定义、执行顺序、异常消息与错误码完全不变，不落盘，`validate` 本身的输出不变，复合结果不含豁免处理。
+
+```python
+from data_quality import apply_violation_exemptions
+
+report = apply_violation_exemptions(result, exemptions)
+```
+
+- `result`：`validate` 的返回结果（只读取其 `violations`；`composite_results` 不参与）。
+- `exemptions`：豁免对象列表，每个对象恰好六键：
+  - `exemption_id`：非空字符串，列表内唯一；
+  - `rule_id`：字符串；
+  - `record_index`：非负整数（布尔不算整数）；
+  - `record_id`：字符串或 `null`；
+  - `field`：字符串；
+  - `reason`：非空字符串，作为豁免证据保留。
+- 按 `rule_id`、`record_index`、`record_id`、`field` 四元组与异常**精确匹配**：`record_id` 为 `null` 时只匹配无 `id` 的异常，字符串 id 不会被 `null` 匹配。
+
+### 拆分结果
+
+```json
+{
+  "status": "ok",
+  "summary": {
+    "input_violation_count": 2,
+    "active_violation_count": 1,
+    "waived_violation_count": 1,
+    "exemption_count": 1
+  },
+  "active_violations": [
+    {"rule_id": "age-range", "record_index": 2, "record_id": "r3", "field": "age", "value": 999, "message": "is out of the allowed range"}
+  ],
+  "waived_violations": [
+    {"rule_id": "age-range", "record_index": 0, "record_id": "r1", "field": "age", "value": 200, "message": "is out of the allowed range", "exemption_id": "e-legacy", "reason": "历史数据已知问题"}
+  ]
+}
+```
+
+- `status` 恒为 `"ok"`；当且仅当 `active_violations` 为空时视为通过（无未豁免异常）。
+- `active_violations` 与 `waived_violations` 均按异常原始顺序保留；未豁免项为原异常对象，已豁免项为副本并附加 `exemption_id` 与 `reason`，输入结果不被修改。
+- `summary` 四计数满足 `input_violation_count = active_violation_count + waived_violation_count`；`exemption_count` 为有效豁免数。
+
+### 豁免错误
+
+以下情况抛 `InvalidExemptionError`（`ValueError` 子类，公开于 `data_quality`，码 `INVALID_EXEMPTION_INPUT`），不返回部分结果：
+
+- `result` 不是 `validate` 结果（缺少 `violations` 列表）；
+- 豁免不是列表、元素不是对象、六键缺失或多余；
+- 字段类型/取值非法（`exemption_id`/`reason` 为空、`record_index` 为负或非整数等）；
+- `exemption_id` 重复，或两条豁免定位同一异常（reason 相同视为重复，不同视为冲突）；
+- 豁免未匹配到任何已报告异常。
 
 ## 命令行
 
@@ -811,6 +874,20 @@ dq validate < payload.json
 - `UNSUPPORTED_COMPOSITE_CONDITION`：不支持的跨字段关联条件类型。
 - `INVALID_COMPOSITE_RULE`：跨字段规则无法确定执行结果（字段不存在、条件引用自身、日期格式不合法等）。
 - `INVALID_RECORD_REFERENCE`：`record_refs` 无法定位到记录。
+
+### dq exemptions
+
+从标准输入读取一个 UTF-8 JSON 对象，必填 `result`（`dq validate` 的完整 JSON 输出）与 `exemptions`（六键豁免对象列表），以 UTF-8 JSON 输出一行拆分结果（`status`、`summary`、`active_violations`、`waived_violations`），不落盘：
+
+```bash
+dq validate < payload.json > result.json
+printf '{"result": %s, "exemptions": %s}' "$(cat result.json)" "$(cat exemptions.json)" | dq exemptions
+```
+
+合法执行退出码为 0；输入有误时退出码为 2，标准输出仅含顶层 `error` 对象：
+
+- `INVALID_JSON`：输入不是合法 UTF-8 或无法解析为 JSON。
+- `INVALID_EXEMPTION_INPUT`：载荷不是 JSON 对象、缺少 `result`/`exemptions`、`result` 不是 validate 结果，或豁免无效、重复、冲突、未匹配到异常。
 
 ### dq query-results
 
@@ -1035,7 +1112,7 @@ dq snapshot-diff < snapshots.json
 
 ### dq quality-gates
 
-从标准输入读取一个 UTF-8 JSON 对象，必填 `records`、`rules`、`gates`，可选 `dataset`；规则与门槛契约与 `evaluate_quality_gates` 的 Python 输入完全相同：
+从标准输入读取一个 UTF-8 JSON 对象，必填 `records`、`rules`、`gates`，可选 `dataset` 与 `exemptions`；规则、门槛与豁免契约与 `evaluate_quality_gates` 的 Python 输入完全相同：
 
 ```bash
 dq quality-gates < gates.json
@@ -1050,17 +1127,21 @@ dq quality-gates < gates.json
   ],
   "gates": [
     {"rule_id": "age-gate", "source_rule_id": "age-range", "max_failed_ratio": 0.1, "severity": "error"}
+  ],
+  "exemptions": [
+    {"exemption_id": "e-legacy", "rule_id": "age-range", "record_index": 0, "record_id": "r1", "field": "age", "reason": "历史数据已知问题"}
   ]
 }
 ```
 
-标准输出为与 Python 入口完全相同的一行 JSON 报告（`dataset`、`results`）。合法执行即使出现 `FAILED` 或 `SKIPPED_EMPTY_DATASET` 也退出 0；输入有误时退出码为 2，标准输出仅含顶层 `error` 对象（只有 `code`、`message` 两个键），错误码依次为：
+标准输出为与 Python 入口完全相同的一行 JSON 报告（`dataset`、`results`）；省略 `exemptions` 或传空列表时报告与基线相同，否则每个门槛结果另含 `waived_count` 与 `waived_samples`。合法执行即使出现 `FAILED` 或 `SKIPPED_EMPTY_DATASET` 也退出 0；输入有误时退出码为 2，标准输出仅含顶层 `error` 对象（只有 `code`、`message` 两个键），错误码依次为：
 
 - `INVALID_JSON`：输入不是合法 UTF-8 或无法解析为 JSON。
 - `INVALID_INPUT`：载荷不是 JSON 对象、缺少 `records`/`rules`/`gates`，或 `records` 结构错误。
 - `INVALID_RULE`：单字段规则定义非法。
 - `INVALID_QUALITY_GATE_RULE`：门槛结构非法、`rule_id` 重复、`severity` 非法，或 `max_failed_ratio` 不是 0–1 的 JSON 数字。
 - `UNKNOWN_QUALITY_GATE_SOURCE`：门槛的 `source_rule_id` 未在 `rules` 中声明。
+- `INVALID_EXEMPTION_INPUT`：豁免无效、重复、冲突或未匹配到异常。
 
 ## 测试
 
