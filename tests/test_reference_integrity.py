@@ -217,5 +217,245 @@ class ValidateReferencesUnknownDatasetTest(unittest.TestCase):
             )
 
 
+def composite_rule(
+    rule_id,
+    source_dataset="order_items",
+    source_fields=("order_id", "line_no"),
+    target_dataset="shipment_lines",
+    target_fields=("order_id", "line_no"),
+):
+    return {
+        "rule_id": rule_id,
+        "source_dataset": source_dataset,
+        "source_fields": list(source_fields),
+        "target_dataset": target_dataset,
+        "target_fields": list(target_fields),
+    }
+
+
+COMPOSITE_DATASETS = {
+    "shipment_lines": [
+        {"id": "s1", "order_id": "o1", "line_no": 1},
+        {"id": "s2", "order_id": "o2", "line_no": 1},
+        {"id": "s3", "order_id": "o3", "line_no": None},
+        {"id": "s4", "order_id": "o4"},
+    ],
+    "order_items": [
+        {"id": "i1", "order_id": "o1", "line_no": 1},
+        {"id": "i2", "order_id": "o9", "line_no": 9},
+        {"id": "i3", "order_id": "o2", "line_no": None},
+        {"id": "i4", "line_no": 1},
+        {"id": "i5", "order_id": None, "line_no": None},
+        {"id": "i6"},
+    ],
+}
+
+
+class ValidateCompositeReferencesSuccessTest(unittest.TestCase):
+    def test_violation_shapes_and_summary(self):
+        result = validate_references(
+            COMPOSITE_DATASETS, [composite_rule("ref-c")]
+        )
+        self.assertEqual(
+            result,
+            {
+                "passed": False,
+                "summary": {
+                    "dataset_count": 2,
+                    "rule_count": 1,
+                    "checked_value_count": 4,
+                    "violation_count": 3,
+                },
+                "violations": [
+                    {
+                        "rule_id": "ref-c",
+                        "source": {
+                            "dataset": "order_items",
+                            "record_index": 1,
+                            "record_id": "i2",
+                            "field": ["order_id", "line_no"],
+                            "value": ["o9", 9],
+                        },
+                        "target": {
+                            "dataset": "shipment_lines",
+                            "field": ["order_id", "line_no"],
+                        },
+                        "message": "has no matching target value",
+                    },
+                    {
+                        "rule_id": "ref-c",
+                        "source": {
+                            "dataset": "order_items",
+                            "record_index": 2,
+                            "record_id": "i3",
+                            "field": ["order_id", "line_no"],
+                            "value": ["o2", None],
+                        },
+                        "target": {
+                            "dataset": "shipment_lines",
+                            "field": ["order_id", "line_no"],
+                        },
+                        "message": "has an incomplete composite reference",
+                    },
+                    {
+                        "rule_id": "ref-c",
+                        "source": {
+                            "dataset": "order_items",
+                            "record_index": 3,
+                            "record_id": "i4",
+                            "field": ["order_id", "line_no"],
+                            "value": [None, 1],
+                        },
+                        "target": {
+                            "dataset": "shipment_lines",
+                            "field": ["order_id", "line_no"],
+                        },
+                        "message": "has an incomplete composite reference",
+                    },
+                ],
+            },
+        )
+
+    def test_passed_when_all_composite_keys_match(self):
+        datasets = {
+            "t": [
+                {"a": 1, "b": "x"},
+                {"a": 1, "b": "y"},
+            ],
+            "s": [
+                {"a": 1, "b": "x"},
+                {"a": 1, "b": "y"},
+                {"a": None, "b": None},
+                {},
+            ],
+        }
+        result = validate_references(
+            datasets, [composite_rule("r1", "s", ("a", "b"), "t", ("a", "b"))]
+        )
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["summary"]["checked_value_count"], 2)
+
+    def test_composite_tuple_matches_positionally(self):
+        datasets = {
+            "t": [{"a": 1, "b": 2}],
+            "s": [{"a": 2, "b": 1}],
+        }
+        result = validate_references(
+            datasets, [composite_rule("r1", "s", ("a", "b"), "t", ("a", "b"))]
+        )
+        self.assertEqual(result["summary"]["violation_count"], 1)
+
+    def test_composite_json_equality_bool_is_not_number(self):
+        datasets = {
+            "t": [{"a": 1, "b": 2}],
+            "s": [{"a": True, "b": 2}],
+        }
+        result = validate_references(
+            datasets, [composite_rule("r1", "s", ("a", "b"), "t", ("a", "b"))]
+        )
+        self.assertEqual(result["summary"]["violation_count"], 1)
+
+    def test_composite_json_equality_containers(self):
+        datasets = {
+            "t": [{"a": {"x": [1, 2]}, "b": 2}],
+            "s": [{"a": {"x": [1, 2]}, "b": 2}],
+        }
+        result = validate_references(
+            datasets, [composite_rule("r1", "s", ("a", "b"), "t", ("a", "b"))]
+        )
+        self.assertTrue(result["passed"])
+
+    def test_target_record_with_null_component_never_matches(self):
+        datasets = {
+            "t": [{"a": 1, "b": None}],
+            "s": [{"a": 1, "b": 3}],
+        }
+        result = validate_references(
+            datasets, [composite_rule("r1", "s", ("a", "b"), "t", ("a", "b"))]
+        )
+        self.assertEqual(result["summary"]["violation_count"], 1)
+
+    def test_mixed_rule_kinds_execute_in_array_order(self):
+        datasets = {
+            "a": [{"f": 1, "g": 2}],
+            "b": [{"h": 3, "i": 4}],
+        }
+        rules = [
+            composite_rule("r2", "a", ("f", "g"), "b", ("h", "i")),
+            rule("r1", "a", "f", "b", "h"),
+        ]
+        result = validate_references(datasets, rules)
+        self.assertEqual(
+            [v["rule_id"] for v in result["violations"]], ["r2", "r1"]
+        )
+
+    def test_duplicate_rule_id_across_rule_kinds(self):
+        with self.assertRaises(InvalidReferenceRuleError):
+            validate_references(
+                {}, [rule("r1"), composite_rule("r1")]
+            )
+
+
+class ValidateCompositeReferencesRuleErrorTest(unittest.TestCase):
+    def test_mixed_rule_shape(self):
+        bad = rule("r1")
+        bad["source_fields"] = ["a"]
+        with self.assertRaises(InvalidReferenceRuleError):
+            validate_references({}, [bad])
+
+    def test_composite_missing_key(self):
+        bad = composite_rule("r1")
+        del bad["target_fields"]
+        with self.assertRaises(InvalidReferenceRuleError):
+            validate_references({}, [bad])
+
+    def test_composite_extra_key(self):
+        bad = composite_rule("r1")
+        bad["extra"] = 1
+        with self.assertRaises(InvalidReferenceRuleError):
+            validate_references({}, [bad])
+
+    def test_fields_not_array(self):
+        bad = composite_rule("r1", source_fields="order_id")
+        with self.assertRaises(InvalidReferenceRuleError):
+            validate_references({}, [bad])
+
+    def test_fields_empty_array(self):
+        bad = composite_rule("r1", source_fields=[], target_fields=[])
+        with self.assertRaises(InvalidReferenceRuleError):
+            validate_references({}, [bad])
+
+    def test_fields_empty_string_element(self):
+        bad = composite_rule("r1", source_fields=("a", ""))
+        with self.assertRaises(InvalidReferenceRuleError):
+            validate_references({}, [bad])
+
+    def test_fields_non_string_element(self):
+        bad = composite_rule("r1", target_fields=("a", 1))
+        with self.assertRaises(InvalidReferenceRuleError):
+            validate_references({}, [bad])
+
+    def test_fields_duplicate_element(self):
+        bad = composite_rule("r1", source_fields=("a", "a"))
+        with self.assertRaises(InvalidReferenceRuleError):
+            validate_references({}, [bad])
+
+    def test_fields_length_mismatch(self):
+        bad = composite_rule("r1", source_fields=("a", "b"), target_fields=("a",))
+        with self.assertRaises(InvalidReferenceRuleError):
+            validate_references({}, [bad])
+
+    def test_composite_empty_dataset_name(self):
+        bad = composite_rule("r1", source_dataset="")
+        with self.assertRaises(InvalidReferenceRuleError):
+            validate_references({}, [bad])
+
+    def test_composite_unknown_dataset(self):
+        with self.assertRaises(UnknownReferenceDatasetError):
+            validate_references(
+                {"order_items": []}, [composite_rule("r1")]
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

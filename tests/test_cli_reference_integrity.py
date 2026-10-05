@@ -93,6 +93,77 @@ class CliReferenceIntegritySuccessTest(unittest.TestCase):
         self.assertTrue(body["passed"])
         self.assertEqual(body["violations"], [])
 
+    def test_composite_rule_output(self):
+        payload = {
+            "datasets": {
+                "shipment_lines": [
+                    {"order_id": "o1", "line_no": 1},
+                    {"order_id": "o2", "line_no": None},
+                ],
+                "order_items": [
+                    {"id": "i1", "order_id": "o1", "line_no": 1},
+                    {"id": "i2", "order_id": "o9", "line_no": 9},
+                    {"id": "i3", "order_id": "o1"},
+                ],
+            },
+            "rules": [
+                {
+                    "rule_id": "明细-发货",
+                    "source_dataset": "order_items",
+                    "source_fields": ["order_id", "line_no"],
+                    "target_dataset": "shipment_lines",
+                    "target_fields": ["order_id", "line_no"],
+                }
+            ],
+        }
+        proc = run_json(payload)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        body = json.loads(proc.stdout.decode("utf-8"))
+        self.assertEqual(
+            body,
+            {
+                "passed": False,
+                "summary": {
+                    "dataset_count": 2,
+                    "rule_count": 1,
+                    "checked_value_count": 3,
+                    "violation_count": 2,
+                },
+                "violations": [
+                    {
+                        "rule_id": "明细-发货",
+                        "source": {
+                            "dataset": "order_items",
+                            "record_index": 1,
+                            "record_id": "i2",
+                            "field": ["order_id", "line_no"],
+                            "value": ["o9", 9],
+                        },
+                        "target": {
+                            "dataset": "shipment_lines",
+                            "field": ["order_id", "line_no"],
+                        },
+                        "message": "has no matching target value",
+                    },
+                    {
+                        "rule_id": "明细-发货",
+                        "source": {
+                            "dataset": "order_items",
+                            "record_index": 2,
+                            "record_id": "i3",
+                            "field": ["order_id", "line_no"],
+                            "value": ["o1", None],
+                        },
+                        "target": {
+                            "dataset": "shipment_lines",
+                            "field": ["order_id", "line_no"],
+                        },
+                        "message": "has an incomplete composite reference",
+                    },
+                ],
+            },
+        )
+
 
 class CliReferenceIntegrityErrorTest(unittest.TestCase):
     def assert_error(self, proc, code):
@@ -135,6 +206,28 @@ class CliReferenceIntegrityErrorTest(unittest.TestCase):
     def test_unknown_dataset(self):
         proc = run_json({"datasets": {}, "rules": PAYLOAD["rules"]})
         self.assert_error(proc, "UNKNOWN_REFERENCE_DATASET")
+
+    def test_composite_rule_length_mismatch(self):
+        payload = {
+            "datasets": {},
+            "rules": [
+                {
+                    "rule_id": "r1",
+                    "source_dataset": "a",
+                    "source_fields": ["x", "y"],
+                    "target_dataset": "b",
+                    "target_fields": ["x"],
+                }
+            ],
+        }
+        proc = run_json(payload)
+        self.assert_error(proc, "INVALID_REFERENCE_RULE")
+
+    def test_mixed_rule_shape(self):
+        rule = dict(PAYLOAD["rules"][0])
+        rule["source_fields"] = ["customer_id"]
+        proc = run_json({"datasets": PAYLOAD["datasets"], "rules": [rule]})
+        self.assert_error(proc, "INVALID_REFERENCE_RULE")
 
 
 if __name__ == "__main__":
