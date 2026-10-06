@@ -9,6 +9,7 @@
 ## 状态
 
 - 已实现：独立的数据质量规则校验（Python 包 `data_quality` 与命令行 `dq validate`）。
+- 已实现：记录字段画像与规则候选（`profile_records` 与命令行 `dq profile`）：只统计顶层字段，产出字段统计与可直接交给 `validate` 的单字段规则对象，不改记录、不落盘，`validate` 既有行为不变。
 - 已实现：上下游血缘追溯（`trace_lineage` 与命令行 `dq lineage`）。
 - 已实现：字段级上下游血缘追溯（`trace_field_lineage` 与命令行 `dq field-lineage`）。
 - 已实现：血缘路径解释与影响范围查询（`explain_lineage_paths` / `explain_field_lineage_paths` 与命令行 `dq lineage-paths` / `dq field-lineage-paths`）。
@@ -93,6 +94,74 @@ JSON 相等为结构化比较：对象忽略键顺序、数组按顺序逐项比
 
 - `InvalidInputError`：`records` 不是列表，或其中元素不是 JSON 对象。
 - `InvalidRuleError`：规则结构错误、未知类型、`id` 为空或重复、`options` 不匹配、`min > max`、`pattern` 不是合法正则等。
+
+## 记录字段画像
+
+`profile_records` 对与 `validate` 相同的 `records`（JSON 对象列表）做顶层字段画像，并生成可直接交给 `validate` 的单字段规则候选；只返回内存结果，不修改记录、不落盘、不访问外部服务。
+
+```python
+from data_quality import profile_records
+
+result = profile_records(records)
+# 或只画像给定字段（保持给定顺序）：
+result = profile_records(records, ["name", "age"])
+```
+
+- `records`：JSON 对象（dict）组成的列表，语义与 `validate` 完全相同。
+- `fields`：可选，字段名列表，元素必须为互不重复的非空字符串，并按给定顺序输出；省略时按各记录顶层键的**首现序**确定字段。
+- 只统计**顶层**字段值；对象/数组整体作为一个值计入类型统计，不递归其中的键。
+
+### 画像返回结果
+
+```json
+{
+  "record_count": 3,
+  "fields": [
+    {
+      "field": "age",
+      "present_count": 3,
+      "missing_count": 0,
+      "null_count": 0,
+      "non_null_count": 3,
+      "distinct_non_null_count": 3,
+      "type_counts": {"null": 0, "boolean": 0, "number": 3, "string": 0, "array": 0, "object": 0},
+      "numeric_min": 1,
+      "numeric_max": 42
+    }
+  ],
+  "rule_candidates": [
+    {"id": "profile:age:required", "type": "required", "options": {"field": "age"}},
+    {"id": "profile:age:unique", "type": "unique", "options": {"field": "age"}},
+    {"id": "profile:age:range", "type": "range", "options": {"field": "age", "min": 1, "max": 42}},
+    {"id": "profile:age:allowed_values", "type": "allowed_values", "options": {"field": "age", "values": [1, 5, 42]}}
+  ]
+}
+```
+
+每个字段画像含：
+
+- `present_count` / `missing_count`：字段在记录中存在（键存在，值为 `null` 也算存在）/ 缺失的记录数。
+- `null_count` / `non_null_count`：存在的记录中值为 `null` / 非 `null` 的数量。
+- `distinct_non_null_count`：非 `null` 值按 `validate` 的 JSON 相等语义去重后的个数（布尔不与数字相等、对象忽略键序、数组逐项比较）。
+- `type_counts`：固定六个键 `null`、`boolean`、`number`、`string`、`array`、`object`；布尔值计入 `boolean` 而不是 `number`。
+- `numeric_min` / `numeric_max`：仅当**非 `null` 值全部为非布尔数字且至少一个**时取最小、最大值；否则为 `null`。
+
+空 `records` 时 `record_count` 为 0；未给 `fields` 时 `fields` 为空数组，给了 `fields` 时每个字段得到一份全零画像（`type_counts` 六键均为 0、`numeric_min`/`numeric_max` 为 `null`）。
+
+### 规则候选
+
+每个字段最多生成四条规则，id 形如 `profile:<字段名>:<类型>`，字段内按 required、unique、range、allowed_values 的顺序排列；字段间按画像字段顺序排列。规则对象与 `validate` 规则结构完全一致，可直接传入 `validate`：
+
+- `required`：至少有一条记录存在且值非 `null`（即存在非缺失非 null 值）。
+- `unique`：至少有两个两两不同的非 `null` 值。
+- `range`：无缺失、无 `null`，且全部为非布尔数字（至少一个）；`min`/`max` 取最小、最大值。
+- `allowed_values`：无缺失，且去重值不超过 20 个；`values` 按值在记录中的**首现序**排列，显式 `null` 也包含在内。
+
+不满足条件的规则不生成；`rule_candidates` 中不出现 `regex` 候选。
+
+### 画像错误
+
+- `InvalidProfileInputError`（`ValueError` 子类，公开于 `data_quality`，码 `INVALID_PROFILE_INPUT`）：`records` 不是列表、其中元素不是 JSON 对象，或 `fields` 不是列表、元素不是非空字符串或存在重复。出错时不返回部分画像。
 
 ## 跨字段一致性规则
 
@@ -874,6 +943,23 @@ dq validate < payload.json
 - `UNSUPPORTED_COMPOSITE_CONDITION`：不支持的跨字段关联条件类型。
 - `INVALID_COMPOSITE_RULE`：跨字段规则无法确定执行结果（字段不存在、条件引用自身、日期格式不合法等）。
 - `INVALID_RECORD_REFERENCE`：`record_refs` 无法定位到记录。
+
+### dq profile
+
+从标准输入读取一个 UTF-8 JSON 对象，必填 `records`（与 `dq validate` 相同的对象数组），可选 `fields`（字段名列表），以 UTF-8 JSON 输出一行画像结果（`record_count`、`fields`、`rule_candidates`），统计口径与 `profile_records` 完全相同：
+
+```bash
+dq profile < payload.json
+```
+
+```json
+{"records": [{"id": "r1", "age": 5}, {"id": "r2", "age": 42}], "fields": ["age"]}
+```
+
+画像不改变输入记录、不写文件、不访问外部服务，`rule_candidates` 可原样作为 `dq validate` 的 `rules` 使用。成功退出码为 0；输入有误时退出码为 2，标准输出仅含顶层 `error` 对象（只有 `code`、`message` 两个键），错误码为：
+
+- `INVALID_JSON`：输入不是合法 UTF-8 或无法解析为 JSON。
+- `INVALID_PROFILE_INPUT`：载荷不是 JSON 对象、缺少 `records`，或 `records`/`fields` 结构非法（元素不是对象、字段名不是非空字符串或重复等）。
 
 ### dq exemptions
 

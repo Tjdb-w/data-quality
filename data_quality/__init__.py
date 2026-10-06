@@ -52,6 +52,10 @@ from .origin_analysis import (
     UnknownOriginTargetError,
     analyze_violation_origins,
 )
+from .profiler import (
+    InvalidProfileInputError,
+    profile_records,
+)
 from .quality_gates import (
     InvalidQualityGateRuleError,
     UnknownQualityGateSourceError,
@@ -77,6 +81,7 @@ from .validator import (
 
 __all__ = [
     "validate",
+    "profile_records",
     "trace_lineage",
     "trace_field_lineage",
     "explain_lineage_paths",
@@ -97,6 +102,7 @@ __all__ = [
     "DataQualityError",
     "InvalidInputError",
     "InvalidRuleError",
+    "InvalidProfileInputError",
     "CompositeRuleSetError",
     "DuplicateRuleIdError",
     "InvalidSeverityError",
