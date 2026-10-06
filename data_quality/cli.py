@@ -1,4 +1,5 @@
-"""Command line interface: ``dq validate``, ``dq exemptions``,
+"""Command line interface: ``dq validate``, ``dq profile``,
+``dq exemptions``,
 ``dq lineage``,
 ``dq field-lineage``, ``dq lineage-paths``, ``dq field-lineage-paths``,
 ``dq correlate``, ``dq correlate-links``, ``dq violation-origins``,
@@ -12,6 +13,11 @@ UTF-8 JSON result to standard output.
 "composite_rules": [...], "record_refs": [...]}`` where ``dataset`` is
 required when ``composite_rules`` is present and ``composite_rules`` /
 ``record_refs`` are optional.
+``dq profile`` reads ``{"records": [...], "fields": [...]}`` where
+``fields`` is an optional list of unique non-empty field names. It uses
+the same record input as ``dq validate`` but never executes rules: it
+profiles top-level fields only and emits validate-shaped rule candidates
+without modifying records or writing anything to disk.
 ``dq exemptions`` reads ``{"result": {...}, "exemptions": [...]}`` where
 ``result`` is a ``dq validate`` result and ``exemptions`` is the list of
 six-key exemption objects; it partitions the result's single-field
@@ -58,6 +64,8 @@ the process exits with status 2:
 
 * ``INVALID_JSON``                    - stdin is not parseable UTF-8 JSON
 * ``INVALID_INPUT``                   - validate payload/records is malformed
+* ``INVALID_PROFILE_INPUT``           - profile payload records/fields is
+                                        malformed
 * ``INVALID_RULE``                    - a validate rule is malformed/conflicting
 * ``INVALID_RULE_SET``                - composite rule set is empty/unusable
 * ``DUPLICATE_RULE_ID``               - two composite rules share a rule_id
@@ -162,6 +170,7 @@ from .origin_analysis import (
     UnknownOriginTargetError,
     analyze_violation_origins,
 )
+from .profiling import InvalidProfileInputError, profile_records
 from .quality_gates import (
     InvalidQualityGateRuleError,
     UnknownQualityGateSourceError,
@@ -248,6 +257,33 @@ def _run_validate() -> int:
         return _emit_error("INVALID_INPUT", str(exc))
     except DataQualityError as exc:
         return _emit_error(exc.code, str(exc))
+
+    json.dump(result, sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+    return EXIT_OK
+
+
+def _run_profile() -> int:
+    payload = _read_json_payload()
+    if payload is _PARSE_FAILED:
+        return EXIT_ERROR
+
+    if not isinstance(payload, dict):
+        return _emit_error(
+            "INVALID_PROFILE_INPUT", "input payload must be a JSON object"
+        )
+    if "records" not in payload:
+        return _emit_error(
+            "INVALID_PROFILE_INPUT", "payload is missing 'records'"
+        )
+
+    try:
+        result = profile_records(
+            payload["records"],
+            payload.get("fields"),
+        )
+    except InvalidProfileInputError as exc:
+        return _emit_error("INVALID_PROFILE_INPUT", str(exc))
 
     json.dump(result, sys.stdout, ensure_ascii=False)
     sys.stdout.write("\n")
@@ -636,6 +672,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="validate records from a UTF-8 JSON object on standard input",
     )
     validate_parser.set_defaults(handler=_run_validate)
+
+    profile_parser = subparsers.add_parser(
+        "profile",
+        help="profile records and generate validate rule candidates from "
+        "a UTF-8 JSON object on standard input",
+    )
+    profile_parser.set_defaults(handler=_run_profile)
 
     exemptions_parser = subparsers.add_parser(
         "exemptions",

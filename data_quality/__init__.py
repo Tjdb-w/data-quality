@@ -52,6 +52,7 @@ from .origin_analysis import (
     UnknownOriginTargetError,
     analyze_violation_origins,
 )
+from .profiling import InvalidProfileInputError, profile_records
 from .quality_gates import (
     InvalidQualityGateRuleError,
     UnknownQualityGateSourceError,
@@ -88,6 +89,7 @@ __all__ = [
     "compare_quality_snapshots",
     "validate_references",
     "evaluate_quality_gates",
+    "profile_records",
     "apply_violation_exemptions",
     "register_composite_rules",
     "evaluate_composite_rules",
@@ -125,6 +127,7 @@ __all__ = [
     "UnknownReferenceDatasetError",
     "InvalidQualityGateRuleError",
     "UnknownQualityGateSourceError",
+    "InvalidProfileInputError",
     "InvalidExemptionError",
 ]
 
