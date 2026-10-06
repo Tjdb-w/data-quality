@@ -1,5 +1,10 @@
 """data_quality: standalone data quality rule validation and lineage tracing."""
 
+from .batch_rules import (
+    InvalidBatchInputError,
+    InvalidBatchRuleError,
+    evaluate_batch_rules,
+)
 from .composite import (
     CompositeRuleSetError,
     DuplicateRuleIdError,
@@ -78,6 +83,7 @@ from .validator import (
 
 __all__ = [
     "validate",
+    "evaluate_batch_rules",
     "trace_lineage",
     "trace_field_lineage",
     "explain_lineage_paths",
@@ -99,6 +105,8 @@ __all__ = [
     "DataQualityError",
     "InvalidInputError",
     "InvalidRuleError",
+    "InvalidBatchInputError",
+    "InvalidBatchRuleError",
     "CompositeRuleSetError",
     "DuplicateRuleIdError",
     "InvalidSeverityError",
