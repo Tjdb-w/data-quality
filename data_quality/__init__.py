@@ -1,5 +1,10 @@
 """data_quality: standalone data quality rule validation and lineage tracing."""
 
+from .batch import (
+    InvalidBatchInputError,
+    InvalidBatchRuleError,
+    evaluate_batch_rules,
+)
 from .composite import (
     CompositeRuleSetError,
     DuplicateRuleIdError,
@@ -89,6 +94,7 @@ __all__ = [
     "compare_quality_snapshots",
     "validate_references",
     "evaluate_quality_gates",
+    "evaluate_batch_rules",
     "profile_records",
     "apply_violation_exemptions",
     "register_composite_rules",
@@ -129,6 +135,8 @@ __all__ = [
     "UnknownQualityGateSourceError",
     "InvalidProfileInputError",
     "InvalidExemptionError",
+    "InvalidBatchInputError",
+    "InvalidBatchRuleError",
 ]
 
 __version__ = "0.9.0"

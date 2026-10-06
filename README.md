@@ -22,6 +22,7 @@
 - 已实现：单字段异常人工豁免（`apply_violation_exemptions` 与命令行 `dq exemptions`）：将 `validate` 结果中的异常按豁免精确拆分为未豁免与已豁免，不落盘、不改变既有规则与结果；质量门槛可选用同一套豁免规则。
 - 已实现：跨字段一致性规则（`register_composite_rules` / `evaluate_composite_rules` / `query_composite_results`，并经 `validate` 与命令行 `dq validate` / `dq query-results` 使用）。
 - 已实现：记录画像与规则候选（`profile_records` 与命令行 `dq profile`）：与 `validate` 同输入，只做内存统计并生成 validate 形态的候选规则对象，不改记录、不落盘、不访问服务。
+- 已实现：批次跨记录校验（`evaluate_batch_rules` 与命令行 `dq batch-validate`）：`unique_key` 复合键跨记录判重、`group_ratio` 分组允许值比例门槛，返回同一内存报告，不改记录、不落盘、不访问服务。
 
 ## 安装
 
@@ -1224,6 +1225,39 @@ dq quality-gates < gates.json
 - `INVALID_QUALITY_GATE_RULE`：门槛结构非法、`rule_id` 重复、`severity` 非法，或 `max_failed_ratio` 不是 0–1 的 JSON 数字。
 - `UNKNOWN_QUALITY_GATE_SOURCE`：门槛的 `source_rule_id` 未在 `rules` 中声明。
 - `INVALID_EXEMPTION_INPUT`：豁免无效、重复、冲突或未匹配到异常。
+
+### dq batch-validate
+
+从标准输入读取一个 UTF-8 JSON 对象，仅含 `records` 与 `rules` 两个键；规则与报告契约与 `evaluate_batch_rules` 的 Python 输入输出完全相同：
+
+```bash
+dq batch-validate < batch.json
+```
+
+```json
+{
+  "records": [
+    {"id": "r1", "a": 1, "b": "x", "region": "cn", "status": "ok"},
+    {"id": "r2", "a": 1, "b": "x", "region": "cn", "status": "bad"}
+  ],
+  "rules": [
+    {"id": "uk-ab", "type": "unique_key", "options": {"fields": ["a", "b"]}},
+    {"id": "gr-status", "type": "group_ratio",
+     "options": {"group_fields": ["region"], "value_field": "status",
+                 "allowed_values": ["ok"], "min_ratio": 0.5}}
+  ]
+}
+```
+
+每条规则只含 `id`、`type`、`options` 三个键：`id` 为非空且唯一的字符串，`type` 为 `unique_key` 或 `group_ratio`，规则按数组顺序执行。`unique_key` 的 `options.fields` 为非空且互异的字段名数组：字段缺失按 `null` 处理，全 `null` 键跳过，部分 `null` 键报告 `has an incomplete unique key`，完整键按 JSON 相等判重且只报告后出现的记录（`is a duplicate unique key`）。`group_ratio` 的 `options` 只含 `group_fields`（非空互异）、`value_field`（非空字符串）、`allowed_values`（非空数组）与 `min_ratio`（`[0, 1]` 的 JSON 数字）：记录按键值分组（缺失按 `null`），值字段按 JSON 相等命中允许项即为满足，组内 `matched_count / record_count` 低于 `min_ratio` 时报告该组（等于阈值通过）。
+
+标准输出为与 Python 入口完全相同的一行 JSON 报告（`passed`、`summary`、`violations`）。`summary` 含 `record_count`、`rule_count`、`checked_group_count`（仅 `group_ratio` 按实际分组计数）与 `violation_count`；异常共有 `rule_id`、`record_index`、`record_id`（组级异常两个定位键均为 `null`），`unique_key` 异常另含 `fields`、`value`、`message`，`group_ratio` 异常另含 `group`、`record_count`、`matched_count`、`ratio`、`samples`（组内每条记录一个样本，按记录顺序，含定位键、`value`、`matched`），组异常按键值的 JSON 升序排列。空记录无异常，空规则直接通过。合法执行即使有异常也退出 0；输入有误时退出码为 2，标准输出仅含顶层 `error` 对象（只有 `code`、`message` 两个键），错误码依次为：
+
+- `INVALID_JSON`：输入不是合法 UTF-8 或无法解析为 JSON。
+- `INVALID_BATCH_RULE`：规则结构非法、`id` 为空或重复、`type` 不受支持或 `options` 有误（先校验规则）。
+- `INVALID_BATCH_INPUT`：载荷不是 JSON 对象、缺少 `records`/`rules`，或 `records` 结构错误（后校验记录）。
+
+除标准输入与标准输出外，不写文件、不访问外部服务。
 
 ## 测试
 

@@ -4,7 +4,7 @@
 ``dq field-lineage``, ``dq lineage-paths``, ``dq field-lineage-paths``,
 ``dq correlate``, ``dq correlate-links``, ``dq violation-origins``,
 ``dq field-impact``, ``dq query-results``, ``dq snapshot-diff``,
-``dq reference-integrity``, ``dq quality-gates``.
+``dq reference-integrity``, ``dq quality-gates``, ``dq batch-validate``.
 
 All subcommands read a UTF-8 JSON object from standard input and write a
 UTF-8 JSON result to standard output.
@@ -58,6 +58,11 @@ with equally long non-empty field arrays paired by position.
 single-field violations; records are checked with the existing
 single-field rules and each gate aggregates the active failed-record
 ratio of its ``source_rule_id``.
+``dq batch-validate`` reads ``{"records": [...], "rules": [...]}`` and
+nothing else; each rule is ``{"id", "type", "options"}`` with ``type``
+one of ``unique_key`` / ``group_ratio`` and the batch rules check
+cross-record uniqueness and per-group allowed-value ratios without
+modifying records or writing anything to disk.
 
 Error JSON has the shape ``{"error": {"code": ..., "message": ...}}`` and
 the process exits with status 2:
@@ -124,6 +129,11 @@ the process exits with status 2:
                                         malformed, duplicated or
                                         conflicting, or it matches no
                                         reported violation
+* ``INVALID_BATCH_RULE``              - batch-validate rule is malformed,
+                                        has a duplicated id, an
+                                        unsupported type or bad options
+* ``INVALID_BATCH_INPUT``             - batch-validate payload/records is
+                                        malformed
 """
 
 from __future__ import annotations
@@ -133,6 +143,11 @@ import json
 import sys
 from typing import Any, List, Optional
 
+from .batch import (
+    InvalidBatchInputError,
+    InvalidBatchRuleError,
+    evaluate_batch_rules,
+)
 from .composite import query_composite_results
 from .correlation import (
     InvalidCorrelationInputError,
@@ -660,6 +675,36 @@ def _run_quality_gates() -> int:
     return EXIT_OK
 
 
+def _run_batch_validate() -> int:
+    payload = _read_json_payload()
+    if payload is _PARSE_FAILED:
+        return EXIT_ERROR
+
+    if not isinstance(payload, dict):
+        return _emit_error(
+            "INVALID_BATCH_INPUT", "input payload must be a JSON object"
+        )
+    if "records" not in payload:
+        return _emit_error(
+            "INVALID_BATCH_INPUT", "payload is missing 'records'"
+        )
+    if "rules" not in payload:
+        return _emit_error(
+            "INVALID_BATCH_INPUT", "payload is missing 'rules'"
+        )
+
+    try:
+        result = evaluate_batch_rules(payload["records"], payload["rules"])
+    except InvalidBatchRuleError as exc:
+        return _emit_error("INVALID_BATCH_RULE", str(exc))
+    except InvalidBatchInputError as exc:
+        return _emit_error("INVALID_BATCH_INPUT", str(exc))
+
+    json.dump(result, sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+    return EXIT_OK
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="dq",
@@ -772,6 +817,14 @@ def build_parser() -> argparse.ArgumentParser:
         "quality gates from a UTF-8 JSON object on standard input",
     )
     quality_gates_parser.set_defaults(handler=_run_quality_gates)
+
+    batch_validate_parser = subparsers.add_parser(
+        "batch-validate",
+        help="validate records against batch cross-record rules "
+        "(unique_key, group_ratio) from a UTF-8 JSON object on "
+        "standard input",
+    )
+    batch_validate_parser.set_defaults(handler=_run_batch_validate)
     return parser
 
 
