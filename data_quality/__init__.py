@@ -5,6 +5,16 @@ from .batch_rules import (
     InvalidBatchRuleError,
     evaluate_batch_rules,
 )
+from .change_impact import (
+    ChangeImpactDatasetNotFoundError,
+    ChangeImpactDuplicateFieldError,
+    ChangeImpactError,
+    ChangeImpactFieldNotFoundError,
+    ChangeImpactInputError,
+    ChangeImpactInvalidFieldsError,
+    ChangeImpactInvalidRenameError,
+    analyze_change_impact,
+)
 from .composite import (
     CompositeRuleSetError,
     DuplicateRuleIdError,
@@ -103,6 +113,7 @@ from .validator import (
 __all__ = [
     "validate",
     "evaluate_batch_rules",
+    "analyze_change_impact",
     "trace_lineage",
     "trace_field_lineage",
     "trace_sample_lineage",
@@ -129,6 +140,13 @@ __all__ = [
     "InvalidRuleError",
     "InvalidBatchInputError",
     "InvalidBatchRuleError",
+    "ChangeImpactError",
+    "ChangeImpactInputError",
+    "ChangeImpactDatasetNotFoundError",
+    "ChangeImpactFieldNotFoundError",
+    "ChangeImpactInvalidRenameError",
+    "ChangeImpactDuplicateFieldError",
+    "ChangeImpactInvalidFieldsError",
     "CompositeRuleSetError",
     "DuplicateRuleIdError",
     "InvalidSeverityError",

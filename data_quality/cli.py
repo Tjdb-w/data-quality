@@ -7,7 +7,8 @@
 ``dq linked-origins``,
 ``dq field-impact``, ``dq query-results``, ``dq snapshot-diff``,
 ``dq lineage-diff``,
-``dq reference-integrity``, ``dq quality-gates``.
+``dq reference-integrity``, ``dq quality-gates``,
+``dq change-impact``.
 
 All subcommands read a UTF-8 JSON object from standard input and write a
 UTF-8 JSON result to standard output.
@@ -21,6 +22,16 @@ no other top-level keys. It evaluates batch-level cross-record rules
 (``unique_key`` / ``group_ratio``) and emits the
 :func:`data_quality.evaluate_batch_rules` report without modifying
 records, writing anything to disk or contacting any service.
+``dq change-impact`` reads ``{"metadata": {"datasets": {...},
+"lineageEdges": [...]}, "change": {...}}`` and emits the
+:func:`data_quality.analyze_change_impact` report: from the entry
+dataset and changed fields it walks the registered directed lineage
+edges downstream and returns the entry change summary plus every
+directly or indirectly affected dataset with the column-proven fields
+hit, their entry-field sources and the stable shortest paths; datasets
+reachable only at dataset level are marked ``unknown``. It never
+modifies data, rules or lineage metadata, writes anything to disk or
+contacts any service.
 ``dq profile`` reads ``{"records": [...], "fields": [...]}`` where
 ``fields`` is an optional list of unique non-empty field names. It uses
 the same record input as ``dq validate`` but never executes rules: it
@@ -94,6 +105,17 @@ the process exits with status 2:
 * ``INVALID_BATCH_INPUT``             - batch-validate payload/records is
                                         malformed or carries extra top-level
                                         keys
+* ``INVALID_CHANGE_IMPACT_INPUT``     - change-impact payload, metadata or
+                                        change object is malformed
+* ``DATASET_NOT_FOUND``               - change-impact entry dataset is not
+                                        declared
+* ``FIELD_NOT_FOUND``                 - change-impact entry field is not
+                                        declared
+* ``INVALID_RENAME``                  - change-impact rename names the same
+                                        field as old and new
+* ``DUPLICATE_FIELD``                 - change-impact request repeats a field
+* ``INVALID_FIELDS``                  - change-impact request carries no
+                                        fields
 * ``INVALID_RULE_SET``                - composite rule set is empty/unusable
 * ``DUPLICATE_RULE_ID``               - two composite rules share a rule_id
 * ``INVALID_SEVERITY``                - composite rule severity is unknown
@@ -187,6 +209,15 @@ from .batch_rules import (
     InvalidBatchInputError,
     InvalidBatchRuleError,
     evaluate_batch_rules,
+)
+from .change_impact import (
+    ChangeImpactDatasetNotFoundError,
+    ChangeImpactDuplicateFieldError,
+    ChangeImpactFieldNotFoundError,
+    ChangeImpactInputError,
+    ChangeImpactInvalidFieldsError,
+    ChangeImpactInvalidRenameError,
+    analyze_change_impact,
 )
 from .composite import query_composite_results
 from .correlation import (
@@ -368,6 +399,31 @@ def _run_batch_validate() -> int:
         return _emit_error("INVALID_BATCH_RULE", str(exc))
     except InvalidBatchInputError as exc:
         return _emit_error("INVALID_BATCH_INPUT", str(exc))
+
+    json.dump(result, sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+    return EXIT_OK
+
+
+def _run_change_impact() -> int:
+    payload = _read_json_payload()
+    if payload is _PARSE_FAILED:
+        return EXIT_ERROR
+
+    try:
+        result = analyze_change_impact(payload)
+    except ChangeImpactInputError as exc:
+        return _emit_error("INVALID_CHANGE_IMPACT_INPUT", str(exc))
+    except ChangeImpactDatasetNotFoundError as exc:
+        return _emit_error(exc.code, str(exc))
+    except ChangeImpactFieldNotFoundError as exc:
+        return _emit_error(exc.code, str(exc))
+    except ChangeImpactInvalidRenameError as exc:
+        return _emit_error(exc.code, str(exc))
+    except ChangeImpactDuplicateFieldError as exc:
+        return _emit_error(exc.code, str(exc))
+    except ChangeImpactInvalidFieldsError as exc:
+        return _emit_error(exc.code, str(exc))
 
     json.dump(result, sys.stdout, ensure_ascii=False)
     sys.stdout.write("\n")
@@ -889,6 +945,13 @@ def build_parser() -> argparse.ArgumentParser:
         "object on standard input",
     )
     batch_validate_parser.set_defaults(handler=_run_batch_validate)
+
+    change_impact_parser = subparsers.add_parser(
+        "change-impact",
+        help="analyze potential downstream impact of a field change from a "
+        "UTF-8 JSON object on standard input",
+    )
+    change_impact_parser.set_defaults(handler=_run_change_impact)
 
     profile_parser = subparsers.add_parser(
         "profile",
