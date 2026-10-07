@@ -51,6 +51,12 @@ from .lineage_paths import (
     explain_field_lineage_paths,
     explain_lineage_paths,
 )
+from .lineage_snapshot_diff import (
+    InvalidLineageDiffQueryError,
+    InvalidLineageSnapshotError,
+    UnknownLineageDiffTargetError,
+    compare_lineage_snapshots,
+)
 from .origin_analysis import (
     InvalidOriginInputError,
     UnknownOriginReferenceError,
@@ -101,6 +107,7 @@ __all__ = [
     "analyze_violation_origins",
     "analyze_field_impacts",
     "compare_quality_snapshots",
+    "compare_lineage_snapshots",
     "validate_references",
     "evaluate_quality_gates",
     "profile_records",
@@ -142,6 +149,9 @@ __all__ = [
     "UnknownOriginTargetError",
     "InvalidSnapshotInputError",
     "UnknownSnapshotReferenceError",
+    "InvalidLineageSnapshotError",
+    "InvalidLineageDiffQueryError",
+    "UnknownLineageDiffTargetError",
     "InvalidReferenceInputError",
     "InvalidReferenceRuleError",
     "UnknownReferenceDatasetError",

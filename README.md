@@ -18,6 +18,7 @@
 - 已实现：异常来源证据分析（`analyze_violation_origins` 与命令行 `dq violation-origins`）。
 - 已实现：字段级质量影响分析（`analyze_field_impacts` 与命令行 `dq field-impact`）。
 - 已实现：两次快照的异常漂移对比（`compare_quality_snapshots` 与命令行 `dq snapshot-diff`）。
+- 已实现：两份字段血缘快照对比（`compare_lineage_snapshots` 与命令行 `dq lineage-diff`）：对给定目标字段比较两份快照的字段/边增减与各方向可达差异，只做内存计算，不改记录、不落盘、不访问服务。
 - 已实现：跨数据集引用完整性校验（`validate_references` 与命令行 `dq reference-integrity`）。
 - 已实现：数据集级质量门槛（`evaluate_quality_gates` 与命令行 `dq quality-gates`）：以单字段规则为基础，按门槛汇总失败记录比例并给出异常样本。
 - 已实现：批次跨记录校验（`evaluate_batch_rules` 与命令行 `dq batch-validate`）：在同一批对象记录上执行复合唯一键（`unique_key`）与分组比例（`group_ratio`）规则，返回同一内存报告，不改记录、不落盘、不访问服务。
@@ -856,6 +857,91 @@ result = compare_quality_snapshots(payload)
 
 校验顺序为血缘图结构 → 两侧结果结构（含重复冲突）→ 两侧引用解析；结构错误先于未知引用错误。
 
+## 两份字段血缘快照对比
+
+`compare_lineage_snapshots` 在字段级血缘之上，比较两份已经采集完成的快照（`baseline` 与 `current`），并针对一组目标字段给出各自上下游可达范围的差异。只做内存计算：不修改输入、不落盘、不访问服务；`dq snapshot-diff` 的既有入口与语义保持不变。
+
+```python
+from data_quality import compare_lineage_snapshots
+
+result = compare_lineage_snapshots(payload)
+```
+
+- `payload`：恰好包含 `baseline`、`current`、`targets` 三个顶层键（键多余或缺失均抛错）。
+  - `baseline` / `current`：各自恰好含 `fields`、`edges` 两个键，结构与 `trace_field_lineage` 的输入完全一致（`fields` 为表 id 到字段 id 列表的对象；`edges` 为只含 `source`、`target` 的边，端点为已声明的 `{"table", "column"}`，重复边报错）；两侧分别独立校验。
+  - `targets`：非空的字段对象数组，每项恰好含 `table`、`column` 两个非空字符串键，且数组内不可重复；顺序即结果顺序。
+- 全局变化按字段与边的集合差分类，与目标是否可达无关：仅 `current` 或仅 `baseline` 声明的字段进入 `field_added` / `field_removed`，同理的边进入 `edge_added` / `edge_removed`。
+- 每个目标的状态：
+  - 仅在一侧声明为 `added`（仅 `current`）或 `removed`（仅 `baseline`），其两个 delta 均为空集合；
+  - 两侧都声明时，分别计算两个方向的「目标自身 + 可达字段」集合以及这些字段之间的全部诱导边（与 `trace_field_lineage` 侧形状一致，含与目标相连的边）；任一方向的可达字段或诱导边不同即为 `changed`，否则为 `unchanged`。
+
+### 血缘快照对比返回结果
+
+```json
+{
+  "status": "ok",
+  "summary": {
+    "added_field_count": 1,
+    "removed_field_count": 1,
+    "added_edge_count": 1,
+    "removed_edge_count": 1,
+    "changed_target_count": 1,
+    "unchanged_target_count": 1
+  },
+  "changes": {
+    "field_added": [
+      {"field": {"table": "ads", "column": "q"}}
+    ],
+    "field_removed": [
+      {"field": {"table": "ods", "column": "b"}}
+    ],
+    "edge_added": [
+      {"edge": {"source": {"table": "ads", "column": "q"}, "target": {"table": "ads", "column": "z"}}}
+    ],
+    "edge_removed": [
+      {"edge": {"source": {"table": "dwd", "column": "x"}, "target": {"table": "ods", "column": "b"}}}
+    ]
+  },
+  "targets": [
+    {
+      "field": {"table": "ads", "column": "z"},
+      "status": "changed",
+      "upstream_delta": {
+        "added_fields": [{"table": "ads", "column": "q"}],
+        "removed_fields": [],
+        "added_edges": [
+          {"source": {"table": "ads", "column": "q"}, "target": {"table": "ads", "column": "z"}}
+        ],
+        "removed_edges": []
+      },
+      "downstream_delta": {
+        "added_fields": [],
+        "removed_fields": [{"table": "ods", "column": "b"}],
+        "added_edges": [],
+        "removed_edges": [
+          {"source": {"table": "dwd", "column": "x"}, "target": {"table": "ods", "column": "b"}}
+        ]
+      }
+    }
+  ]
+}
+```
+
+- 顶层恰好含 `status`、`summary`、`changes`、`targets`，`status` 恒为 `"ok"`。
+- `summary` 六键固定顺序为 `added_field_count`、`removed_field_count`、`added_edge_count`、`removed_edge_count`、`changed_target_count`、`unchanged_target_count`（`added`/`removed` 目标不计入 changed/unchanged）。
+- `changes` 恰好含四键 `field_added`、`field_removed`、`edge_added`、`edge_removed`，各为数组：字段条目只含 `field`（`{"table", "column"}`），边条目只含 `edge`（`{"source", "target"}`）；字段按 `(table, column)`、边按 `(source.table, source.column, target.table, target.column)` 排序，不依赖字典迭代顺序，无变化时对应数组为空。
+- `targets` 与查询数组保序；每项含 `field`、`status`、`upstream_delta`、`downstream_delta`。delta 的四集合固定为 `added_fields`、`removed_fields`、`added_edges`、`removed_edges`，方向均以 `current` 相对 `baseline` 计（added = current 有而 baseline 无）；字段按 `(table, column)`、边按 `(source, target)` 排序。相同输入始终得到完全相同的结果。
+
+### 血缘快照对比错误
+
+以下情况抛出异常（均为 `ValueError` 子类，公开于 `data_quality`），不返回部分结果：
+
+- `InvalidLineageSnapshotError`（码 `INVALID_LINEAGE_SNAPSHOT`）：顶层不是对象或三键不齐、任一侧快照不是恰好含 `fields`/`edges` 的对象，或任一侧字段/边结构非法（标识为空、字段或边重复、端点未声明等）。
+- `InvalidLineageDiffQueryError`（码 `INVALID_LINEAGE_DIFF_QUERY`）：`targets` 不是非空数组、目标不是恰好含 `table`/`column` 的非空字符串对象，或目标重复。
+- `UnknownLineageDiffTargetError`（码 `UNKNOWN_LINEAGE_DIFF_TARGET`）：目标在两份快照中都未声明（仅一侧声明是正常的 `added`/`removed`）。
+
+校验顺序为 JSON（命令行边界）→ 顶层与两份快照（先 baseline 后 current）→ targets 形状 → 逐目标存在性；结构错误先于未知目标错误。
+
 ## 数据集级质量门槛
 
 数据集级门槛在既有单字段规则之上做比例汇总：规则定义与判定完全沿用 `validate`，不重新解释；门槛按 `source_rule_id` 引用一条已声明规则，汇总该规则的失败记录占比。
@@ -1373,6 +1459,48 @@ dq snapshot-diff < snapshots.json
 - `UNKNOWN_SNAPSHOT_REFERENCE`：任一侧结果引用了未声明的数据集或字段。
 
 除标准输入与标准输出外，不写文件、不访问外部服务。
+
+### dq lineage-diff
+
+从标准输入读取两份字段血缘快照对比的 UTF-8 JSON 对象，`baseline`、`current`、`targets` 三个顶层键均必填（键多余或缺失均报错）；两侧快照与目标的契约与 `compare_lineage_snapshots` 的 Python 输入完全相同：
+
+```bash
+dq lineage-diff < lineage-snapshots.json
+```
+
+```json
+{
+  "baseline": {
+    "fields": {"ods": ["name"], "dwd": ["label"]},
+    "edges": [
+      {"source": {"table": "ods", "column": "name"},
+       "target": {"table": "dwd", "column": "label"}}
+    ]
+  },
+  "current": {
+    "fields": {"ods": ["name"], "dwd": ["label"], "ads": ["label"]},
+    "edges": [
+      {"source": {"table": "ods", "column": "name"},
+       "target": {"table": "dwd", "column": "label"}},
+      {"source": {"table": "dwd", "column": "label"},
+       "target": {"table": "ads", "column": "label"}}
+    ]
+  },
+  "targets": [
+    {"table": "ods", "column": "name"},
+    {"table": "ads", "column": "label"}
+  ]
+}
+```
+
+标准输出只写一行与 `compare_lineage_snapshots` 完全相同的结果 JSON（`status`、`summary`、`changes`、`targets`）。合法查询（含存在变化）退出码为 0；输入有误时退出码为 2 且 `message` 非空，标准输出仅含顶层 `error` 对象（只有 `code`、`message` 两个键），错误码依次为：
+
+- `INVALID_JSON`：输入不是合法 UTF-8 或无法解析为 JSON。
+- `INVALID_LINEAGE_SNAPSHOT`：顶层或任一侧快照结构、字段、边、端点、重复项有误。
+- `INVALID_LINEAGE_DIFF_QUERY`：`targets` 缺失、为空、结构非法或目标重复。
+- `UNKNOWN_LINEAGE_DIFF_TARGET`：目标在两份快照中均未声明。
+
+除标准输入与标准输出外，不写文件、不访问外部服务；`dq snapshot-diff` 入口不受影响。
 
 ### dq quality-gates
 
