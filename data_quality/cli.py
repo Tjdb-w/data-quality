@@ -8,7 +8,7 @@
 ``dq field-impact``, ``dq query-results``, ``dq snapshot-diff``,
 ``dq lineage-diff``,
 ``dq change-impact``,
-``dq reference-integrity``, ``dq quality-gates``.
+``dq reference-integrity``, ``dq quality-gates``, ``dq composite-gates``.
 
 All subcommands read a UTF-8 JSON object from standard input and write a
 UTF-8 JSON result to standard output.
@@ -85,6 +85,13 @@ with equally long non-empty field arrays paired by position.
 single-field violations; records are checked with the existing
 single-field rules and each gate aggregates the active failed-record
 ratio of its ``source_rule_id``.
+``dq composite-gates`` reads ``{"dataset": ..., "records": [...],
+"rules": [...], "gates": [...]}`` with no other top-level keys, where
+``dataset`` is a non-empty string, ``rules`` are composite (cross-field)
+rules as for ``dq validate`` and each gate is ``{"rule_id",
+"source_rule_id", "max_failed_ratio", "severity"}``; each gate
+aggregates the failed-over-evaluated record ratio of its composite
+``source_rule_id`` and keeps the failing records as samples.
 
 Error JSON has the shape ``{"error": {"code": ..., "message": ...}}`` and
 the process exits with status 2:
@@ -184,8 +191,9 @@ the process exits with status 2:
                                         unknown severity or a
                                         max_failed_ratio that is not a
                                         JSON number in [0, 1]
-* ``UNKNOWN_QUALITY_GATE_SOURCE``     - quality-gates gate references a
-                                        rule that is not declared
+* ``UNKNOWN_QUALITY_GATE_SOURCE``     - quality-gates / composite-gates
+                                        gate references a rule that is
+                                        not declared
 * ``INVALID_EXEMPTION_INPUT``         - exemptions payload is not a
                                         validate result, an exemption is
                                         malformed, duplicated or
@@ -210,6 +218,7 @@ from .change_impact import (
     analyze_change_impact,
 )
 from .composite import query_composite_results
+from .composite_gates import evaluate_composite_quality_gates
 from .correlation import (
     InvalidCorrelationInputError,
     InvalidLinkedCorrelationInputError,
@@ -891,6 +900,48 @@ def _run_quality_gates() -> int:
     return EXIT_OK
 
 
+def _run_composite_gates() -> int:
+    payload = _read_json_payload()
+    if payload is _PARSE_FAILED:
+        return EXIT_ERROR
+
+    required_keys = {"dataset", "records", "rules", "gates"}
+    if not isinstance(payload, dict):
+        return _emit_error(
+            "INVALID_INPUT", "input payload must be a JSON object"
+        )
+    if set(payload) != required_keys:
+        missing = sorted(required_keys - set(payload))
+        if missing:
+            return _emit_error(
+                "INVALID_INPUT", f"payload is missing keys: {missing}"
+            )
+        unknown = sorted(set(payload) - required_keys)
+        return _emit_error(
+            "INVALID_INPUT", f"payload has unsupported keys: {unknown}"
+        )
+
+    try:
+        result = evaluate_composite_quality_gates(
+            payload["dataset"],
+            payload["records"],
+            payload["rules"],
+            payload["gates"],
+        )
+    except InvalidInputError as exc:
+        return _emit_error("INVALID_INPUT", str(exc))
+    except InvalidQualityGateRuleError as exc:
+        return _emit_error("INVALID_QUALITY_GATE_RULE", str(exc))
+    except UnknownQualityGateSourceError as exc:
+        return _emit_error("UNKNOWN_QUALITY_GATE_SOURCE", str(exc))
+    except DataQualityError as exc:
+        return _emit_error(exc.code, str(exc))
+
+    json.dump(result, sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+    return EXIT_OK
+
+
 def _run_change_impact() -> int:
     payload = _read_json_payload()
     if payload is _PARSE_FAILED:
@@ -1055,6 +1106,14 @@ def build_parser() -> argparse.ArgumentParser:
         "quality gates from a UTF-8 JSON object on standard input",
     )
     quality_gates_parser.set_defaults(handler=_run_quality_gates)
+
+    composite_gates_parser = subparsers.add_parser(
+        "composite-gates",
+        help="aggregate cross-field composite rule failure ratios into "
+        "dataset-level quality gates from a UTF-8 JSON object on "
+        "standard input",
+    )
+    composite_gates_parser.set_defaults(handler=_run_composite_gates)
     return parser
 
 

@@ -28,6 +28,9 @@ from .composite import (
     register_composite_rules,
     sample_id_for_record,
 )
+from .composite_gates import (
+    evaluate_composite_quality_gates,
+)
 from .correlation import (
     InvalidCorrelationInputError,
     InvalidLinkedCorrelationInputError,
@@ -128,6 +131,7 @@ __all__ = [
     "compare_lineage_snapshots",
     "validate_references",
     "evaluate_quality_gates",
+    "evaluate_composite_quality_gates",
     "profile_records",
     "apply_violation_exemptions",
     "register_composite_rules",

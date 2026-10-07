@@ -23,6 +23,7 @@
 - 已实现：两份字段血缘快照的比较（`compare_lineage_snapshots` 与命令行 `dq lineage-diff`）：比较两份内存中的字段血缘快照，并为目标字段给出上下游可达字段与诱导边差异，不修改记录、不落盘、不访问服务。
 - 已实现：跨数据集引用完整性校验（`validate_references` 与命令行 `dq reference-integrity`）。
 - 已实现：数据集级质量门槛（`evaluate_quality_gates` 与命令行 `dq quality-gates`）：以单字段规则为基础，按门槛汇总失败记录比例并给出异常样本。
+- 已实现：跨字段质量门槛（`evaluate_composite_quality_gates` 与命令行 `dq composite-gates`）：以跨字段（组合）规则为基础，按门槛汇总多字段一致性失败记录占可判定记录的比例并给出失败样本。
 - 已实现：批次跨记录校验（`evaluate_batch_rules` 与命令行 `dq batch-validate`）：在同一批对象记录上执行复合唯一键（`unique_key`）与分组比例（`group_ratio`）规则，返回同一内存报告，不改记录、不落盘、不访问服务。
 - 已实现：单字段异常人工豁免（`apply_violation_exemptions` 与命令行 `dq exemptions`）：将 `validate` 结果中的异常按豁免精确拆分为未豁免与已豁免，不落盘、不改变既有规则与结果；质量门槛可选用同一套豁免规则。
 - 已实现：跨字段一致性规则（`register_composite_rules` / `evaluate_composite_rules` / `query_composite_results`，并经 `validate` 与命令行 `dq validate` / `dq query-results` 使用）。
@@ -1756,6 +1757,39 @@ dq quality-gates < gates.json
 - `INVALID_QUALITY_GATE_RULE`：门槛结构非法、`rule_id` 重复、`severity` 非法，或 `max_failed_ratio` 不是 0–1 的 JSON 数字。
 - `UNKNOWN_QUALITY_GATE_SOURCE`：门槛的 `source_rule_id` 未在 `rules` 中声明。
 - `INVALID_EXEMPTION_INPUT`：豁免无效、重复、冲突或未匹配到异常。
+
+### dq composite-gates
+
+从标准输入读取一个 UTF-8 JSON 对象，**恰好**含 `dataset`、`records`、`rules`、`gates` 四个顶层键（缺失或多余均报错）；`dataset` 为非空字符串，`rules` 为跨字段（组合）规则（语义与 `register_composite_rules` 完全相同），每个门槛为 `{"rule_id", "source_rule_id", "max_failed_ratio", "severity"}` 四键对象，`source_rule_id` 必须引用已声明的组合规则：
+
+```bash
+dq composite-gates < composite-gates.json
+```
+
+```json
+{
+  "dataset": "orders",
+  "records": [
+    {"id": "r1", "start": "2026-03-01", "end": "2026-02-01"},
+    {"id": "r2", "start": "2026-01-01", "end": "2026-02-01"}
+  ],
+  "rules": [
+    {"rule_id": "dates", "fields": ["start", "end"], "severity": "error",
+     "conditions": [{"type": "date_before", "earlier_field": "start", "later_field": "end"}]}
+  ],
+  "gates": [
+    {"rule_id": "dates-gate", "source_rule_id": "dates", "max_failed_ratio": 0.1, "severity": "error"}
+  ]
+}
+```
+
+每个门槛按序汇总其组合规则的逐记录结论：`failed_count` 为 `FAILED` 记录数，`skipped_count` 为因缺字段而跳过的记录数，`evaluated_count` 为可判定记录数（`record_count - skipped_count`），`record_count` 为总记录数；`ratio` 仅在 `evaluated_count > 0` 时为 `failed_count / evaluated_count`，否则为 `null`。`ratio <= max_failed_ratio` 时门槛 `PASSED`，否则 `FAILED`；空数据集或全部跳过时为 `SKIPPED_NO_EVALUATED_RECORDS`（既不通过也不失败）。结果在既有门槛字段之外另含 `severity`、`skipped_count`、`evaluated_count`，按 `gates` 顺序输出；`samples` 只列 `FAILED` 记录并保持输入顺序，每个样本含 `record_index`、`record_id`、`fields`、`field_values`（按规则声明字段顺序冻结）与 `failed_conditions`（按定义顺序给出 `type` 与字段引用）。标准输出为与 Python 入口 `evaluate_composite_quality_gates` 完全相同的一行 JSON 报告（`dataset`、`results`）。合法执行即使出现 `FAILED` 或 `SKIPPED_NO_EVALUATED_RECORDS` 也退出 0；输入有误时退出码为 2，标准输出仅含顶层 `error` 对象（只有 `code`、`message` 两个键），错误码依次为：
+
+- `INVALID_JSON`：输入不是合法 UTF-8 或无法解析为 JSON。
+- `INVALID_INPUT`：载荷不是 JSON 对象、顶层键缺失或多余、`dataset` 不是非空字符串，或 `records` 结构错误。
+- `INVALID_RULE_SET` / `DUPLICATE_RULE_ID` / `INVALID_SEVERITY` / `UNSUPPORTED_COMPOSITE_CONDITION` / `INVALID_COMPOSITE_RULE`：组合规则集非法（语义同 `dq validate` 的跨字段规则）。
+- `INVALID_QUALITY_GATE_RULE`：门槛结构非法、`rule_id` 重复、`severity` 非法，或 `max_failed_ratio` 不是 0–1 的 JSON 数字。
+- `UNKNOWN_QUALITY_GATE_SOURCE`：门槛的 `source_rule_id` 未在 `rules` 中声明。
 
 ### dq batch-validate
 
