@@ -5,6 +5,7 @@
 ``dq sample-lineage``,
 ``dq correlate``, ``dq correlate-links``, ``dq violation-origins``,
 ``dq field-impact``, ``dq query-results``, ``dq snapshot-diff``,
+``dq lineage-diff``,
 ``dq reference-integrity``, ``dq quality-gates``.
 
 All subcommands read a UTF-8 JSON object from standard input and write a
@@ -54,6 +55,10 @@ and explains the concrete field-level upstream/downstream paths.
 ``dq snapshot-diff`` reads ``{"baseline": {"results": [...]},
 "current": {"results": [...]}, "lineage": {...}}`` and consumes already
 evaluated check results without re-running any rule.
+``dq lineage-diff`` reads ``{"baseline": {"fields": {...}, "edges": [...]},
+"current": {"fields": {...}, "edges": [...]}, "targets": [...]}`` and
+compares two field lineage snapshots in memory around the queried target
+fields without writing anything to disk or contacting any service.
 ``dq reference-integrity`` reads ``{"datasets": {...}, "rules": [...]}``
 where ``datasets`` maps dataset ids to record arrays and each rule is
 either ``{"rule_id", "source_dataset", "source_field", "target_dataset",
@@ -125,6 +130,11 @@ the process exits with status 2:
                                         lineage are malformed
 * ``UNKNOWN_SNAPSHOT_REFERENCE``      - snapshot-diff result references an
                                         undeclared dataset or field
+* ``INVALID_LINEAGE_SNAPSHOT``        - lineage-diff snapshots or top-level
+                                        payload are malformed
+* ``INVALID_LINEAGE_DIFF_QUERY``      - lineage-diff targets are malformed
+* ``UNKNOWN_LINEAGE_DIFF_TARGET``     - lineage-diff target is declared in
+                                        neither snapshot
 * ``INVALID_REFERENCE_INPUT``         - reference-integrity datasets/rules
                                         structure or records are malformed
 * ``INVALID_REFERENCE_RULE``          - reference-integrity rule keys are
@@ -185,6 +195,12 @@ from .lineage import (
     InvalidLineageQueryError,
     UnknownLineageTargetError,
     trace_lineage,
+)
+from .lineage_diff import (
+    InvalidLineageDiffQueryError,
+    InvalidLineageSnapshotError,
+    UnknownLineageDiffTargetError,
+    compare_lineage_snapshots,
 )
 from .lineage_paths import (
     LineageNodeNotFoundError,
@@ -698,6 +714,30 @@ def _run_snapshot_diff() -> int:
     return EXIT_OK
 
 
+def _run_lineage_diff() -> int:
+    payload = _read_json_payload()
+    if payload is _PARSE_FAILED:
+        return EXIT_ERROR
+
+    if not isinstance(payload, dict):
+        return _emit_error(
+            "INVALID_LINEAGE_SNAPSHOT", "input payload must be a JSON object"
+        )
+
+    try:
+        result = compare_lineage_snapshots(payload)
+    except InvalidLineageSnapshotError as exc:
+        return _emit_error("INVALID_LINEAGE_SNAPSHOT", str(exc))
+    except InvalidLineageDiffQueryError as exc:
+        return _emit_error("INVALID_LINEAGE_DIFF_QUERY", str(exc))
+    except UnknownLineageDiffTargetError as exc:
+        return _emit_error("UNKNOWN_LINEAGE_DIFF_TARGET", str(exc))
+
+    json.dump(result, sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+    return EXIT_OK
+
+
 def _run_reference_integrity() -> int:
     payload = _read_json_payload()
     if payload is _PARSE_FAILED:
@@ -878,6 +918,13 @@ def build_parser() -> argparse.ArgumentParser:
         "input",
     )
     snapshot_diff_parser.set_defaults(handler=_run_snapshot_diff)
+
+    lineage_diff_parser = subparsers.add_parser(
+        "lineage-diff",
+        help="compare two field lineage snapshots around queried targets "
+        "from a UTF-8 JSON object on standard input",
+    )
+    lineage_diff_parser.set_defaults(handler=_run_lineage_diff)
 
     reference_integrity_parser = subparsers.add_parser(
         "reference-integrity",

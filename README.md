@@ -18,6 +18,7 @@
 - 已实现：异常来源证据分析（`analyze_violation_origins` 与命令行 `dq violation-origins`）。
 - 已实现：字段级质量影响分析（`analyze_field_impacts` 与命令行 `dq field-impact`）。
 - 已实现：两次快照的异常漂移对比（`compare_quality_snapshots` 与命令行 `dq snapshot-diff`）。
+- 已实现：两份字段血缘快照的比较（`compare_lineage_snapshots` 与命令行 `dq lineage-diff`）：比较两份内存中的字段血缘快照，并为目标字段给出上下游可达字段与诱导边差异，不修改记录、不落盘、不访问服务。
 - 已实现：跨数据集引用完整性校验（`validate_references` 与命令行 `dq reference-integrity`）。
 - 已实现：数据集级质量门槛（`evaluate_quality_gates` 与命令行 `dq quality-gates`）：以单字段规则为基础，按门槛汇总失败记录比例并给出异常样本。
 - 已实现：批次跨记录校验（`evaluate_batch_rules` 与命令行 `dq batch-validate`）：在同一批对象记录上执行复合唯一键（`unique_key`）与分组比例（`group_ratio`）规则，返回同一内存报告，不改记录、不落盘、不访问服务。
@@ -856,6 +857,75 @@ result = compare_quality_snapshots(payload)
 
 校验顺序为血缘图结构 → 两侧结果结构（含重复冲突）→ 两侧引用解析；结构错误先于未知引用错误。
 
+## 两份字段血缘快照的比较
+
+`compare_lineage_snapshots` 在字段级血缘之上消费两份已经成型的血缘快照（`baseline` 与 `current`，各含 `fields`、`edges`，结构与 `trace_field_lineage` 的输入一致），外加一份非空 `targets` 目标字段列表，只在内存中比较，不重跑任何规则、不修改输入、不落盘、不访问服务。
+
+```python
+from data_quality import compare_lineage_snapshots
+
+result = compare_lineage_snapshots(payload)
+```
+
+- `payload`：恰好包含 `baseline`、`current`、`targets` 三个顶层键（键多余或缺失均抛错）。
+  - `baseline` / `current`：恰好含 `fields`、`edges` 两键的对象，各自独立按字段级血缘契约校验（表 id 非空、字段互不重复、边两端均为只含 `table`、`column` 的已声明字段、重复边拒绝；自环与环路合法）。同一字段只在一侧声明不是结构错误。
+  - `targets`：非空数组，每项为恰好含 `table`、`column` 两个非空字符串键的字段对象，数组内不可重复。
+- 可达方向沿用字段级血缘语义：上游沿边反向，下游沿边正向；目标自身总在本侧可达集合中；诱导边为可达字段集合两端均在内的全部原始边。
+- 相同输入始终得到完全相同的结果，不依赖字典迭代顺序。
+
+### 血缘快照比较返回结果
+
+```json
+{
+  "status": "ok",
+  "summary": {
+    "added_field_count": 1,
+    "removed_field_count": 0,
+    "added_edge_count": 1,
+    "removed_edge_count": 0,
+    "changed_target_count": 1,
+    "unchanged_target_count": 1
+  },
+  "changes": [
+    {"type": "field_added", "field": {"table": "rpt", "column": "p"}},
+    {"type": "edge_added", "edge": {"source": {"table": "ads", "column": "z"}, "target": {"table": "rpt", "column": "p"}}}
+  ],
+  "targets": [
+    {
+      "field": {"table": "ads", "column": "z"},
+      "status": "changed",
+      "upstream_delta": {"added_fields": [], "removed_fields": [], "added_edges": [], "removed_edges": []},
+      "downstream_delta": {
+        "added_fields": [{"table": "rpt", "column": "p"}],
+        "removed_fields": [],
+        "added_edges": [
+          {"source": {"table": "ads", "column": "z"}, "target": {"table": "rpt", "column": "p"}}
+        ],
+        "removed_edges": []
+      }
+    }
+  ]
+}
+```
+
+- 顶层恰好含 `status`、`summary`、`changes`、`targets`，`status` 恒为 `"ok"`。
+- `summary` 六键成对展开：`added_field_count`/`removed_field_count` 与 `added_edge_count`/`removed_edge_count` 为两份快照之间的整体差异计数，`changed_target_count`/`unchanged_target_count` 为双侧目标中 `changed` 与 `unchanged` 的计数（单侧 added/removed 目标计入 `changed_target_count`）。
+- `changes` 为快照级差异，四类条目依次为 `field_added`、`edge_added`、`field_removed`、`edge_removed`；字段条目含 `field`（`{"table", "column"}`），边条目含 `edge`（`{"source", "target"}`，两端为字段对象）。同类内字段按 `(table, column)`、边按 `(source.table, source.column, target.table, target.column)` 排序。
+- `targets` 与查询目标严格同序，每项含 `field`、`status`、`upstream_delta`、`downstream_delta`：
+  - `status`：目标只在 `current` 为 `added`，只在 `baseline` 为 `removed`；双侧均有时，上游或下游任一方向的可达字段集合或诱导边集合不同即为 `changed`，否则 `unchanged`。
+  - 单侧目标：缺失侧按空集合处理，因此其两个 delta 以该侧全部可达字段与诱导边作为 `added_*`（added 目标）或 `removed_*`（removed 目标）。
+  - `upstream_delta`/`downstream_delta` 各含四集合：`added_fields`、`removed_fields`、`added_edges`、`removed_edges`，字段按 `(table, column)`、边按 `(source, target)` 排序。
+
+### 血缘快照比较错误
+
+以下情况抛出异常（均为 `ValueError` 子类，公开于 `data_quality`），不返回部分结果：
+
+- `InvalidLineageSnapshotError`（码 `INVALID_LINEAGE_SNAPSHOT`）：顶层不是对象或三键不齐，或任一侧快照不是恰好含 `fields`、`edges` 的对象、图结构非法。
+- `InvalidLineageDiffQueryError`（码 `INVALID_LINEAGE_DIFF_QUERY`）：`targets` 不是非空数组、目标形状不对、键缺失/多余、值不是非空字符串或目标重复。
+- `UnknownLineageDiffTargetError`（码 `UNKNOWN_LINEAGE_DIFF_TARGET`）：目标在两份快照中均未声明（只在一侧声明合法）。
+
+校验顺序为 JSON → 顶层与两份快照 → targets 形状 → 逐目标存在性；结构错误先于查询形状错误，查询形状错误先于未知目标错误。
+
 ## 数据集级质量门槛
 
 数据集级门槛在既有单字段规则之上做比例汇总：规则定义与判定完全沿用 `validate`，不重新解释；门槛按 `source_rule_id` 引用一条已声明规则，汇总该规则的失败记录占比。
@@ -1373,6 +1443,43 @@ dq snapshot-diff < snapshots.json
 - `UNKNOWN_SNAPSHOT_REFERENCE`：任一侧结果引用了未声明的数据集或字段。
 
 除标准输入与标准输出外，不写文件、不访问外部服务。
+
+### dq lineage-diff
+
+从标准输入读取字段血缘快照比较的 UTF-8 JSON 对象，`baseline`、`current`、`targets` 三个顶层键均必填（键多余或缺失均报错）；契约与 `compare_lineage_snapshots` 的 Python 输入完全相同：
+
+```bash
+dq lineage-diff < lineage-snapshots.json
+```
+
+```json
+{
+  "baseline": {
+    "fields": {"ods": ["name"], "dwd": ["label"]},
+    "edges": [
+      {"source": {"table": "ods", "column": "name"},
+       "target": {"table": "dwd", "column": "label"}}
+    ]
+  },
+  "current": {
+    "fields": {"ods": ["name"], "dwd": ["label"], "ads": ["label"]},
+    "edges": [
+      {"source": {"table": "ods", "column": "name"},
+       "target": {"table": "dwd", "column": "label"}},
+      {"source": {"table": "dwd", "column": "label"},
+       "target": {"table": "ads", "column": "label"}}
+    ]
+  },
+  "targets": [{"table": "dwd", "column": "label"}]
+}
+```
+
+合法查询退出码为 0（即使存在 added/removed/changed 差异），标准输出只写一行与 `compare_lineage_snapshots` 完全相同的结果 JSON（`status`、`summary`、`changes`、`targets`），只处理内存、不修改记录、不落盘、不访问服务。输入有误时退出码为 2 且 `message` 非空，标准输出仅含顶层 `error` 对象（只有 `code`、`message` 两个键），错误码依次为：
+
+- `INVALID_JSON`：输入不是合法 UTF-8 或无法解析为 JSON。
+- `INVALID_LINEAGE_SNAPSHOT`：顶层或任一侧快照结构、字段、边、端点、重复项有误。
+- `INVALID_LINEAGE_DIFF_QUERY`：`targets` 不是非空无重复的字段对象数组，或目标键集合/取值非法。
+- `UNKNOWN_LINEAGE_DIFF_TARGET`：目标在两份快照中均未声明。
 
 ### dq quality-gates
 
