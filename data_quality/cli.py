@@ -1,7 +1,8 @@
 """Command line interface: ``dq validate``, ``dq profile``,
 ``dq exemptions``,
 ``dq lineage``,
-``dq field-lineage``, ``dq lineage-paths``, ``dq field-lineage-paths``,
+``dq field-lineage``, ``dq sample-lineage``,
+``dq lineage-paths``, ``dq field-lineage-paths``,
 ``dq correlate``, ``dq correlate-links``, ``dq violation-origins``,
 ``dq field-impact``, ``dq query-results``, ``dq snapshot-diff``,
 ``dq reference-integrity``, ``dq quality-gates``.
@@ -36,6 +37,12 @@ are optional.
 ``dq field-lineage`` reads ``{"fields": {...}, "edges": [...], "target": ...,
 "direction": ..., "max_depth": ...}`` where ``direction`` and ``max_depth``
 are optional.
+``dq sample-lineage`` reads ``{"samples": [...], "fields": {...},
+"edges": [...], "sample_links": [...], "target": ..., "direction": ...,
+"max_depth": ...}`` where ``direction`` and ``max_depth`` are optional;
+field edges carry ``witnesses`` (table/column references) and sample
+links are undirected. It reports sample-level lineage without modifying
+records, writing anything to disk or contacting any service.
 ``dq lineage-paths`` reads the same payload as ``dq lineage`` and explains
 the concrete upstream/downstream paths of the target.
 ``dq field-lineage-paths`` reads the same payload as ``dq field-lineage``
@@ -93,6 +100,13 @@ the process exits with status 2:
 * ``INVALID_FIELD_LINEAGE_QUERY``     - field-lineage target/direction/max_depth
                                         is invalid
 * ``UNKNOWN_FIELD_LINEAGE_TARGET``    - field-lineage target is not declared
+* ``INVALID_SAMPLE_LINEAGE_INPUT``    - sample-lineage samples/fields/edges/
+                                        sample_links are missing/malformed
+* ``INVALID_SAMPLE_LINEAGE_QUERY``    - sample-lineage target/direction/
+                                        max_depth is invalid
+* ``UNKNOWN_SAMPLE_LINEAGE_TARGET``   - sample-lineage target is not declared
+* ``UNKNOWN_SAMPLE_LINEAGE_REFERENCE`` - sample-lineage sample_links endpoint
+                                         is not declared
 * ``LINEAGE_NODE_NOT_FOUND``          - lineage-paths target is not declared
 * ``INVALID_CORRELATION_INPUT``       - correlate results/lineage are malformed
 * ``UNKNOWN_CORRELATION_REFERENCE``   - correlate result references an
@@ -197,6 +211,13 @@ from .reference_integrity import (
     InvalidReferenceRuleError,
     UnknownReferenceDatasetError,
     validate_references,
+)
+from .sample_lineage import (
+    InvalidSampleLineageInputError,
+    InvalidSampleLineageQueryError,
+    UnknownSampleLineageReferenceError,
+    UnknownSampleLineageTargetError,
+    trace_sample_lineage,
 )
 from .snapshot_diff import (
     InvalidSnapshotInputError,
@@ -458,6 +479,40 @@ def _run_field_lineage() -> int:
         return _emit_error("INVALID_FIELD_LINEAGE_QUERY", str(exc))
     except UnknownFieldLineageTargetError as exc:
         return _emit_error("UNKNOWN_FIELD_LINEAGE_TARGET", str(exc))
+
+    json.dump(result, sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+    return EXIT_OK
+
+
+def _run_sample_lineage() -> int:
+    payload = _read_json_payload()
+    if payload is _PARSE_FAILED:
+        return EXIT_ERROR
+
+    if not isinstance(payload, dict):
+        return _emit_error(
+            "INVALID_SAMPLE_LINEAGE_INPUT", "input payload must be a JSON object"
+        )
+
+    try:
+        result = trace_sample_lineage(
+            payload.get("samples"),
+            payload.get("fields"),
+            payload.get("edges"),
+            payload.get("sample_links"),
+            payload.get("target"),
+            payload.get("direction", "both"),
+            payload.get("max_depth", None),
+        )
+    except InvalidSampleLineageInputError as exc:
+        return _emit_error("INVALID_SAMPLE_LINEAGE_INPUT", str(exc))
+    except InvalidSampleLineageQueryError as exc:
+        return _emit_error("INVALID_SAMPLE_LINEAGE_QUERY", str(exc))
+    except UnknownSampleLineageTargetError as exc:
+        return _emit_error("UNKNOWN_SAMPLE_LINEAGE_TARGET", str(exc))
+    except UnknownSampleLineageReferenceError as exc:
+        return _emit_error("UNKNOWN_SAMPLE_LINEAGE_REFERENCE", str(exc))
 
     json.dump(result, sys.stdout, ensure_ascii=False)
     sys.stdout.write("\n")
@@ -760,6 +815,13 @@ def build_parser() -> argparse.ArgumentParser:
         "JSON object on standard input",
     )
     field_lineage_parser.set_defaults(handler=_run_field_lineage)
+
+    sample_lineage_parser = subparsers.add_parser(
+        "sample-lineage",
+        help="trace upstream/downstream sample-level lineage from a UTF-8 "
+        "JSON object on standard input",
+    )
+    sample_lineage_parser.set_defaults(handler=_run_sample_lineage)
 
     lineage_paths_parser = subparsers.add_parser(
         "lineage-paths",
