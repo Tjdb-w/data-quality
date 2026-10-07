@@ -23,6 +23,7 @@
 - 已实现：两份字段血缘快照的比较（`compare_lineage_snapshots` 与命令行 `dq lineage-diff`）：比较两份内存中的字段血缘快照，并为目标字段给出上下游可达字段与诱导边差异，不修改记录、不落盘、不访问服务。
 - 已实现：跨数据集引用完整性校验（`validate_references` 与命令行 `dq reference-integrity`）。
 - 已实现：数据集级质量门槛（`evaluate_quality_gates` 与命令行 `dq quality-gates`）：以单字段规则为基础，按门槛汇总失败记录比例并给出异常样本。
+- 已实现：跨字段质量门槛（`evaluate_composite_quality_gates` 与命令行 `dq composite-gates`）：以跨字段复合规则为基础，按门槛汇总可判定记录中的失败比例（跳过记录不计入分母），并给出失败记录、参与字段取值与失败条件样本。
 - 已实现：批次跨记录校验（`evaluate_batch_rules` 与命令行 `dq batch-validate`）：在同一批对象记录上执行复合唯一键（`unique_key`）与分组比例（`group_ratio`）规则，返回同一内存报告，不改记录、不落盘、不访问服务。
 - 已实现：单字段异常人工豁免（`apply_violation_exemptions` 与命令行 `dq exemptions`）：将 `validate` 结果中的异常按豁免精确拆分为未豁免与已豁免，不落盘、不改变既有规则与结果；质量门槛可选用同一套豁免规则。
 - 已实现：跨字段一致性规则（`register_composite_rules` / `evaluate_composite_rules` / `query_composite_results`，并经 `validate` 与命令行 `dq validate` / `dq query-results` 使用）。
@@ -1153,6 +1154,85 @@ report = evaluate_quality_gates(dataset, records, rules, gates, exemptions)
 
 校验顺序为规则定义 → 门槛结构 → `source_rule_id` 引用解析 → 记录结构 → 豁免校验与匹配；规则/门槛定义先于记录检查。
 
+## 跨字段质量门槛
+
+跨字段质量门槛在既有跨字段（组合）规则之上做比例汇总：规则定义与逐记录判定完全沿用 `register_composite_rules` / `evaluate_composite_rules`，不重新解释；门槛按 `source_rule_id` 引用一条已声明的复合规则，在**可判定记录**中汇总失败比例。
+
+```python
+from data_quality import evaluate_composite_quality_gates
+
+report = evaluate_composite_quality_gates(dataset, records, rules, gates)
+```
+
+- `dataset`：非空数据集标识字符串，原样写入报告并用于注册复合规则；为空或非字符串抛 `InvalidCompositeGateInputError`。
+- `records`：JSON 对象（dict）组成的列表；非列表或含非对象记录抛 `InvalidCompositeGateInputError`。
+- `rules`：复合规则对象的非空列表，语义与 `register_composite_rules`（以及 `dq validate` 的 `composite_rules`）完全相同；非法定义抛出既有复合规则异常。
+- `gates`：门槛对象列表，按数组顺序汇总。每条门槛恰好含四键（与单字段门槛相同）：
+  - `rule_id`：门槛自身唯一、非空的字符串标识；
+  - `source_rule_id`：非空字符串，必须引用 `rules` 中声明的复合规则 id；
+  - `max_failed_ratio`：0 到 1 之间的 JSON 数字（布尔不是数字）；
+  - `severity`：仅限 `error`、`warning`、`info`。
+
+### 汇总与判定
+
+逐记录沿用复合规则语义：参与字段缺失的记录判为 `SKIPPED_MISSING_FIELD`，既非通过也非失败。对每条门槛：
+
+- `failed_count`：`FAILED` 记录数；
+- `skipped_count`：跳过记录数；
+- `evaluated_count`：可判定（`PASSED` 或 `FAILED`）记录数；
+- `record_count`：总记录数；
+- `ratio`：仅当 `evaluated_count > 0` 时为 `failed_count / evaluated_count`，否则为 `null`；
+- `ratio <= max_failed_ratio` 判为 `PASSED`，否则 `FAILED`（等于门槛值算通过）；
+- 空记录集或全部记录跳过时为 `SKIPPED_NO_EVALUATED_RECORDS`，`ratio` 为 `null`、`samples` 为空，不计成败。
+
+`samples` 只列 `FAILED` 记录并保持输入顺序，每条含：
+
+- `record_index`、`record_id`：沿用复合结果的记录定位（缺 `id` 时 `record_id` 为 `null`）；
+- `fields`：规则声明顺序的参与字段名；
+- `field_values`：按字段顺序冻结的参与字段取值快照（不含未参与字段）；
+- `failed_conditions`：按定义顺序给出未满足条件，每条含 `type` 与该条件引用的字段（如 `left_field` / `right_field`、`earlier_field` / `later_field`、`when_field` / `required_field`）。
+
+```json
+{
+  "dataset": "orders",
+  "results": [
+    {
+      "rule_id": "date-gate",
+      "source_rule_id": "dates",
+      "status": "FAILED",
+      "severity": "error",
+      "failed_count": 1,
+      "skipped_count": 1,
+      "evaluated_count": 2,
+      "record_count": 3,
+      "ratio": 0.5,
+      "samples": [
+        {
+          "record_index": 1,
+          "record_id": "r2",
+          "fields": ["start", "end"],
+          "field_values": {"start": "2026-03-01", "end": "2026-02-01"},
+          "failed_conditions": [
+            {"type": "date_before", "earlier_field": "start", "later_field": "end"}
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+### 跨字段门槛错误
+
+以下异常均公开于 `data_quality`，不返回部分结果：
+
+- `InvalidCompositeGateInputError`（`ValueError` 子类，码 `INVALID_COMPOSITE_GATE_INPUT`）：`dataset` 为空或非字符串、`records` 不是列表或任一记录不是 JSON 对象。
+- 既有复合规则异常：`CompositeRuleSetError`（`INVALID_RULE_SET`）、`DuplicateRuleIdError`（`DUPLICATE_RULE_ID`）、`InvalidSeverityError`（`INVALID_SEVERITY`）、`UnsupportedCompositeConditionError`（`UNSUPPORTED_COMPOSITE_CONDITION`）、`InvalidCompositeRuleError`（`INVALID_COMPOSITE_RULE`）。
+- `InvalidCompositeGateRuleError`（`ValueError` 子类，码 `INVALID_COMPOSITE_GATE_RULE`）：`gates` 不是列表、门槛不是对象、键缺失或多余、`rule_id` 为空或重复、`source_rule_id` 为空或非字符串、`severity` 非法，或 `max_failed_ratio` 不是 0–1 的 JSON 数字（含布尔）。
+- `UnknownCompositeGateSourceError`（`LookupError` 子类，码 `UNKNOWN_COMPOSITE_GATE_SOURCE`）：`source_rule_id` 未在复合规则中声明。
+
+校验顺序为复合规则定义 → 门槛结构 → `source_rule_id` 引用解析 → 记录结构；规则/门槛定义先于记录检查。
+
 ## 批次跨记录校验
 
 单字段、跨字段与跨数据集门槛之外，批次校验覆盖同一批记录之间的规则。入口 `evaluate_batch_rules` 只在内存中完成：不修改记录、不落盘、不访问服务。
@@ -1756,6 +1836,44 @@ dq quality-gates < gates.json
 - `INVALID_QUALITY_GATE_RULE`：门槛结构非法、`rule_id` 重复、`severity` 非法，或 `max_failed_ratio` 不是 0–1 的 JSON 数字。
 - `UNKNOWN_QUALITY_GATE_SOURCE`：门槛的 `source_rule_id` 未在 `rules` 中声明。
 - `INVALID_EXEMPTION_INPUT`：豁免无效、重复、冲突或未匹配到异常。
+
+### dq composite-gates
+
+从标准输入读取一个 UTF-8 JSON 对象，顶层**恰好**含 `dataset`、`records`、`rules`、`gates` 四键（缺失或多余均报错）；`rules` 为跨字段复合规则定义（与 `dq validate` 的 `composite_rules` 语义相同），`gates` 契约与 `evaluate_composite_quality_gates` 完全相同：
+
+```bash
+dq composite-gates < composite_gates.json
+```
+
+```json
+{
+  "dataset": "orders",
+  "records": [
+    {"id": "r1", "start": "2026-01-01", "end": "2026-02-01"},
+    {"id": "r2", "start": "2026-03-01", "end": "2026-02-01"},
+    {"id": "r3"}
+  ],
+  "rules": [
+    {"rule_id": "dates", "fields": ["start", "end"], "severity": "error",
+     "conditions": [{"type": "date_before", "earlier_field": "start", "later_field": "end"}]}
+  ],
+  "gates": [
+    {"rule_id": "date-gate", "source_rule_id": "dates", "max_failed_ratio": 0.1, "severity": "error"}
+  ]
+}
+```
+
+标准输出为与 Python 入口完全相同的一行 JSON 报告（`dataset`、`results`；结果含 `severity`、`skipped_count`、`evaluated_count`）。合法执行即使出现 `FAILED` 或 `SKIPPED_NO_EVALUATED_RECORDS` 也退出 0；全程内存计算，不落盘、不访问服务。输入有误时退出码为 2，标准输出仅含顶层 `error` 对象（只有 `code`、`message` 两个键），错误码依次为：
+
+- `INVALID_JSON`：输入不是合法 UTF-8 或无法解析为 JSON。
+- `INVALID_COMPOSITE_GATE_INPUT`：载荷不是 JSON 对象、顶层键不恰好为 `dataset`/`records`/`rules`/`gates`、`dataset` 不是非空字符串，或 `records` 不是对象数组。
+- `INVALID_RULE_SET`：复合规则集为空或结构不可用。
+- `DUPLICATE_RULE_ID`：两条复合规则共用同一 `rule_id`。
+- `INVALID_SEVERITY`：复合规则的 `severity` 非法。
+- `UNSUPPORTED_COMPOSITE_CONDITION`：复合条件 `type` 不受支持。
+- `INVALID_COMPOSITE_RULE`：复合规则无法执行（字段未声明、自引用、日期格式非法、条件畸形等）。
+- `INVALID_COMPOSITE_GATE_RULE`：门槛结构非法、`rule_id` 重复、`severity` 非法，或 `max_failed_ratio` 不是 0–1 的 JSON 数字。
+- `UNKNOWN_COMPOSITE_GATE_SOURCE`：门槛的 `source_rule_id` 未在复合规则中声明。
 
 ### dq batch-validate
 
