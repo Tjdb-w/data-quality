@@ -16,6 +16,7 @@
 - 已实现：异常样本跨规则关联定位（`correlate_violations` 与命令行 `dq correlate`）。
 - 已实现：跨数据集关联样本的异常关联定位（`correlate_linked_violations` 与命令行 `dq correlate-links`）。
 - 已实现：异常来源证据分析（`analyze_violation_origins` 与命令行 `dq violation-origins`）。
+- 已实现：跨样本异常来源归因（`analyze_linked_origins` 与命令行 `dq linked-origins`）：在字段血缘与无向样本关联上为目标异常给出跨样本来源/影响证据，只做内存计算，不改记录、不落盘、不访问服务。
 - 已实现：字段级质量影响分析（`analyze_field_impacts` 与命令行 `dq field-impact`）。
 - 已实现：两次快照的异常漂移对比（`compare_quality_snapshots` 与命令行 `dq snapshot-diff`）。
 - 已实现：两份字段血缘快照的比较（`compare_lineage_snapshots` 与命令行 `dq lineage-diff`）：比较两份内存中的字段血缘快照，并为目标字段给出上下游可达字段与诱导边差异，不修改记录、不落盘、不访问服务。
@@ -705,6 +706,35 @@ result = analyze_violation_origins(results, lineage, targets)
 
 校验顺序为血缘图结构 → 结果结构（含重复冲突）→ targets 结构 → 结果引用解析 → 逐目标违规定位。
 
+## 跨样本异常来源归因
+
+`analyze_linked_origins` 是 `analyze_violation_origins` 的跨样本版本：在字段血缘之外额外接收一份无向 `sample_links`（结构、校验与去重语义沿用 `correlate_linked_violations`），用字段血缘与无向样本关联共同解释目标异常。`results`、`lineage` 与 `correlate_violations` 完全相同，`targets` 与 `analyze_violation_origins` 完全相同（保持原序、保留重复项）。
+
+```python
+from data_quality import analyze_linked_origins
+
+result = analyze_linked_origins(results, lineage, sample_links, targets)
+```
+
+- 证据只取经 `sample_links` 与目标样本无向连通的样本上的违规结果；未连通样本、通过结果不参与。
+- 证据项保留检查结果全部键（`rule_id`、`dataset_id`、`field_id`、`sample_id`、`violated`、`value`），并增加两条路径：
+  - `sample_path`：目标样本到证据样本的最短无向样本路径，由 `{"dataset_id", "sample_id"}` 项组成（目标样本自身为单节点）。
+  - `path`：按字段血缘正向书写的最短字段路径，由 `{"dataset_id", "field_id"}` 项组成。
+- `originEvidence`：证据字段为目标字段自身或其上游（可沿正向边到达目标）；`path` 从证据字段延伸到目标字段。
+- `impactEvidence`：证据字段为目标字段沿正向边可到达的**其他**字段；`path` 从目标字段延伸到证据字段。同样本同字段不进入 `impactEvidence`，自环不产生自我影响；但目标字段在其他关联样本中的违规同时进入两类证据。
+- 两类路径均取边数最少者，并列时取完整引用序列字典序最小者；证据按字段 `path` 长度、`dataset_id`、`field_id`、`sample_id`、`rule_id` 排序；无证据时为空列表。
+- `reports` 与 `targets` 一一对应并保持其顺序；空 `targets` 返回 `{"reports": []}`；不修改输入。
+
+### 跨样本归因错误
+
+以下情况抛出异常（均公开于 `data_quality`），且不返回部分结果：
+
+- `LinkedOriginInputError`（`ValueError` 子类，码 `INVALID_INPUT`）：顶层键集合或 `results`/`lineage`/`sample_links`/`targets` 结构有误、标识为空、重复记录内容冲突、边非法或矛盾、自链接或重复关系。
+- `LinkedOriginReferenceError`（`LookupError` 子类，码 `UNKNOWN_REFERENCE`）：校验结果引用了未声明的数据集或字段，或 `sample_links` 端点在 `results` 中找不到相同 `dataset_id` + `sample_id` 的结果。
+- `LinkedOriginTargetError`（`LookupError` 子类，码 `UNKNOWN_TARGET`）：目标没有对应的 `violated=true` 结果。
+
+校验顺序为血缘图结构 → 结果结构（含重复冲突）→ sample_links 结构 → targets 结构 → 结果引用解析 → 链接端点解析 → 逐目标违规定位。命令行 `dq linked-origins` 下依次映射为 `INVALID_INPUT`、`UNKNOWN_REFERENCE`、`UNKNOWN_TARGET`（退出码 2）；无法解析为 UTF-8 JSON 时为 `INVALID_JSON`。
+
 ## 字段级质量影响分析
 
 `analyze_field_impacts` 在既有规则校验、异常定位与字段血缘之上，从一批种子字段出发，分析每个种子沿有向血缘边可达的下游字段，以及落在这些下游字段上的非通过规则与可定位异常样本。
@@ -1388,6 +1418,57 @@ dq violation-origins < origins.json
 - `UNKNOWN_ORIGIN_TARGET`：目标没有对应的 `violated=true` 结果。
 
 除标准输入与标准输出外，不写文件、不访问外部服务。
+
+### dq linked-origins
+
+从标准输入读取跨样本异常来源归因的 UTF-8 JSON 对象，顶层恰好含 `results`、`lineage`、`sample_links`、`targets` 四个键（键多余或缺失均报错）：
+
+```bash
+dq linked-origins < linked-origins.json
+```
+
+其中 `results`、`lineage` 与 `dq correlate` 完全相同，`sample_links` 与 `dq correlate-links` 完全相同；`targets` 与 `dq violation-origins` 完全相同（保持原序、保留重复项）：
+
+```json
+{
+  "results": [
+    {"rule_id": "r1", "dataset_id": "ods", "field_id": "name", "sample_id": "a", "violated": true, "value": "x"},
+    {"rule_id": "r2", "dataset_id": "dwd", "field_id": "label", "sample_id": "b", "violated": true, "value": "y"}
+  ],
+  "lineage": {
+    "datasets": ["ods", "dwd"],
+    "fields": {"ods": ["name"], "dwd": ["label"]},
+    "edges": [
+      {"source": {"dataset": "dwd", "field": "label"},
+       "target": {"dataset": "ods", "field": "name"}, "type": "upstream"}
+    ]
+  },
+  "sample_links": [
+    {"left": {"dataset_id": "ods", "sample_id": "a"},
+     "right": {"dataset_id": "dwd", "sample_id": "b"}}
+  ],
+  "targets": [
+    {"dataset_id": "dwd", "field_id": "label", "sample_id": "b"}
+  ]
+}
+```
+
+合法输入退出码为 0，标准输出只写一行 Python 结果 JSON（`reports`，与 `targets` 同序，含重复目标）。每份报告含 `target`、`originEvidence`、`impactEvidence`：
+
+- 证据项保留检查结果的全部键（`rule_id`、`dataset_id`、`field_id`、`sample_id`、`violated`、`value`），并增加 `sample_path` 与 `path`。
+- `sample_path` 为目标样本到证据样本的最短无向 `sample_links` 路径（节点为 `{"dataset_id", "sample_id"}`，目标样本自身为单节点；无关联可达则不产生证据）。
+- `path` 按字段血缘正向书写：`originEvidence` 从证据字段到目标字段，`impactEvidence` 从目标字段到证据字段（节点为 `{"dataset_id", "field_id"}`）。
+- 目标字段自身或其上游字段的违反结果归 `originEvidence`；目标字段沿正向边可到达的其他字段归 `impactEvidence`。同样本同字段不进入 `impactEvidence`（自环不产生自我影响）；目标字段在其他关联样本中的违反结果同时进入两类证据。
+- 路径取边数最少者，并列时取完整引用序列字典序最小者；证据按字段路径长度及 `dataset_id`、`field_id`、`sample_id`、`rule_id` 排序；无证据时为空列表。
+
+输入有误时退出码为 2 且 `message` 非空，错误码依次为：
+
+- `INVALID_JSON`：输入不是合法 UTF-8 或无法解析为 JSON。
+- `INVALID_INPUT`：顶层键集合、`results`/`lineage`/`sample_links`/`targets` 结构、标识、重复记录或边有误。
+- `UNKNOWN_REFERENCE`：校验结果引用了未声明的数据集或字段，或 `sample_links` 端点在 `results` 中找不到相同 `dataset_id` + `sample_id` 的结果。
+- `UNKNOWN_TARGET`：目标没有对应的 `violated=true` 结果。
+
+出错时仅输出 `{"error": {"code": ..., "message": ...}}`，不返回部分结果。除标准输入与标准输出外，不写文件、不访问外部服务。
 
 ### dq field-impact
 

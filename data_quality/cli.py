@@ -4,6 +4,7 @@
 ``dq field-lineage``, ``dq lineage-paths``, ``dq field-lineage-paths``,
 ``dq sample-lineage``,
 ``dq correlate``, ``dq correlate-links``, ``dq violation-origins``,
+``dq linked-origins``,
 ``dq field-impact``, ``dq query-results``, ``dq snapshot-diff``,
 ``dq lineage-diff``,
 ``dq reference-integrity``, ``dq quality-gates``.
@@ -50,6 +51,8 @@ and explains the concrete field-level upstream/downstream paths.
 "sample_links": [...]}``.
 ``dq violation-origins`` reads ``{"results": [...], "lineage": {...},
 "targets": [...]}``.
+``dq linked-origins`` reads exactly ``{"results": [...], "lineage": {...},
+"sample_links": [...], "targets": [...]}`` with no other top-level keys.
 ``dq field-impact`` reads ``{"datasets": {...}, "lineageEdges": [...],
 "validationResults": [...], "anomalySamples": {...}, "seedFields": [...]}``.
 ``dq snapshot-diff`` reads ``{"baseline": {"results": [...]},
@@ -123,6 +126,14 @@ the process exits with status 2:
                                         an undeclared dataset or field
 * ``UNKNOWN_ORIGIN_TARGET``           - violation-origins target has no
                                         matching violated result
+* ``INVALID_INPUT`` (linked-origins)  - linked-origins payload, results,
+                                        lineage, sample_links or targets
+                                        are malformed
+* ``UNKNOWN_REFERENCE``               - linked-origins result references an
+                                        undeclared dataset/field or a sample
+                                        link endpoint matches no result
+* ``UNKNOWN_TARGET``                  - linked-origins target has no matching
+                                        violated result
 * ``INVALID_IMPACT_INPUT``            - field-impact payload structure, key
                                         set, references, rule statuses or
                                         sample mapping is malformed
@@ -206,6 +217,12 @@ from .lineage_paths import (
     LineageNodeNotFoundError,
     explain_field_lineage_paths,
     explain_lineage_paths,
+)
+from .linked_origin_analysis import (
+    LinkedOriginInputError,
+    LinkedOriginReferenceError,
+    LinkedOriginTargetError,
+    analyze_linked_origins,
 )
 from .origin_analysis import (
     InvalidOriginInputError,
@@ -677,6 +694,47 @@ def _run_violation_origins() -> int:
     return EXIT_OK
 
 
+def _run_linked_origins() -> int:
+    payload = _read_json_payload()
+    if payload is _PARSE_FAILED:
+        return EXIT_ERROR
+
+    if not isinstance(payload, dict):
+        return _emit_error(
+            "INVALID_INPUT", "input payload must be a JSON object"
+        )
+
+    required_keys = {"results", "lineage", "sample_links", "targets"}
+    if set(payload) != required_keys:
+        missing = sorted(required_keys - set(payload))
+        if missing:
+            return _emit_error(
+                "INVALID_INPUT", f"payload is missing keys: {missing}"
+            )
+        unknown = sorted(set(payload) - required_keys)
+        return _emit_error(
+            "INVALID_INPUT", f"payload has unsupported keys: {unknown}"
+        )
+
+    try:
+        result = analyze_linked_origins(
+            payload["results"],
+            payload["lineage"],
+            payload["sample_links"],
+            payload["targets"],
+        )
+    except LinkedOriginInputError as exc:
+        return _emit_error("INVALID_INPUT", str(exc))
+    except LinkedOriginReferenceError as exc:
+        return _emit_error("UNKNOWN_REFERENCE", str(exc))
+    except LinkedOriginTargetError as exc:
+        return _emit_error("UNKNOWN_TARGET", str(exc))
+
+    json.dump(result, sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+    return EXIT_OK
+
+
 def _run_field_impact() -> int:
     payload = _read_json_payload()
     if payload is _PARSE_FAILED:
@@ -896,6 +954,14 @@ def build_parser() -> argparse.ArgumentParser:
         "of violated targets from a UTF-8 JSON object on standard input",
     )
     violation_origins_parser.set_defaults(handler=_run_violation_origins)
+
+    linked_origins_parser = subparsers.add_parser(
+        "linked-origins",
+        help="analyze origin and impact evidence of violated targets across "
+        "field lineage and undirected linked samples from a UTF-8 JSON "
+        "object on standard input",
+    )
+    linked_origins_parser.set_defaults(handler=_run_linked_origins)
 
     field_impact_parser = subparsers.add_parser(
         "field-impact",

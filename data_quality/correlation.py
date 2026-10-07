@@ -379,18 +379,16 @@ def _validate_link_endpoint(endpoint: Any, where: str) -> SampleRef:
     return (dataset, sample)
 
 
-def _validate_sample_links(
-    sample_links: Any, records: List[Dict[str, Any]]
+def _validate_sample_link_structure(
+    sample_links: Any,
 ) -> List[Tuple[SampleRef, SampleRef]]:
-    """Validate the undirected sample link graph.
+    """Validate the shape of the undirected sample link graph.
 
     Returns the links as ``(left_ref, right_ref)`` pairs. Structural
     problems (not a list, missing/extra keys, empty identifiers), self
     links and duplicate (including reversed) relationships raise
-    :class:`InvalidLinkedCorrelationInputError`; endpoints that do not
-    match any result raise
-    :class:`UnknownLinkedCorrelationReferenceError`. Structural problems
-    are reported before unknown references.
+    :class:`InvalidLinkedCorrelationInputError`. Endpoint existence is
+    checked separately by :func:`_validate_sample_links`.
     """
     if not isinstance(sample_links, list):
         raise _linked_input_error("sample_links must be a list")
@@ -420,8 +418,7 @@ def _validate_sample_links(
         )
         pairs.append((left, right))
 
-    # Self links and duplicate relationships are structural errors and
-    # take precedence over unknown-reference errors.
+    # Self links and duplicate relationships are structural errors.
     seen_relations: Set[FrozenSet[SampleRef]] = set()
     for left, right in pairs:
         if left == right:
@@ -437,6 +434,14 @@ def _validate_sample_links(
             )
         seen_relations.add(relation)
 
+    return pairs
+
+
+def _check_sample_link_references(
+    pairs: List[Tuple[SampleRef, SampleRef]],
+    records: List[Dict[str, Any]],
+) -> None:
+    """Reject link endpoints that do not match a result."""
     known_refs: Set[SampleRef] = {
         (record["dataset_id"], record["sample_id"]) for record in records
     }
@@ -448,6 +453,22 @@ def _validate_sample_links(
                     f"{_sample_ref(endpoint)!r}"
                 )
 
+
+def _validate_sample_links(
+    sample_links: Any, records: List[Dict[str, Any]]
+) -> List[Tuple[SampleRef, SampleRef]]:
+    """Validate the undirected sample link graph.
+
+    Returns the links as ``(left_ref, right_ref)`` pairs. Structural
+    problems (not a list, missing/extra keys, empty identifiers), self
+    links and duplicate (including reversed) relationships raise
+    :class:`InvalidLinkedCorrelationInputError`; endpoints that do not
+    match any result raise
+    :class:`UnknownLinkedCorrelationReferenceError`. Structural problems
+    are reported before unknown references.
+    """
+    pairs = _validate_sample_link_structure(sample_links)
+    _check_sample_link_references(pairs, records)
     return pairs
 
 
