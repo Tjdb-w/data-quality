@@ -5,6 +5,16 @@ from .batch_rules import (
     InvalidBatchRuleError,
     evaluate_batch_rules,
 )
+from .change_impact import (
+    ChangeImpactError,
+    ChangeImpactInputError,
+    DatasetNotFoundError,
+    DuplicateFieldError,
+    FieldNotFoundError,
+    InvalidFieldsError,
+    InvalidRenameError,
+    analyze_change_impact,
+)
 from .composite import (
     CompositeRuleSetError,
     DuplicateRuleIdError,
@@ -113,6 +123,7 @@ __all__ = [
     "analyze_violation_origins",
     "analyze_linked_origins",
     "analyze_field_impacts",
+    "analyze_change_impact",
     "compare_quality_snapshots",
     "compare_lineage_snapshots",
     "validate_references",
@@ -169,6 +180,13 @@ __all__ = [
     "UnknownQualityGateSourceError",
     "InvalidProfileInputError",
     "InvalidExemptionError",
+    "ChangeImpactError",
+    "ChangeImpactInputError",
+    "DatasetNotFoundError",
+    "FieldNotFoundError",
+    "InvalidRenameError",
+    "DuplicateFieldError",
+    "InvalidFieldsError",
 ]
 
 __version__ = "0.9.0"

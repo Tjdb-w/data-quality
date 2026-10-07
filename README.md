@@ -18,6 +18,7 @@
 - 已实现：异常来源证据分析（`analyze_violation_origins` 与命令行 `dq violation-origins`）。
 - 已实现：跨样本异常来源归因（`analyze_linked_origins` 与命令行 `dq linked-origins`）：在无向样本关联上跨样本解释目标异常，证据同时给出最短无向 `sample_path` 与正向字段血缘 `path`，只做内存计算，不改记录、不落盘、不访问服务。
 - 已实现：字段级质量影响分析（`analyze_field_impacts` 与命令行 `dq field-impact`）。
+- 已实现：变更影响分析（`analyze_change_impact` 与命令行 `dq change-impact`）：对入口数据集的删除、重命名、类型变更，沿已登记的有向血缘边计算直接或间接下游数据集、可证明的受影响字段、字段来源与稳定最短路径，只做内存计算，不改数据、规则或血缘元数据、不落盘、不访问服务。
 - 已实现：两次快照的异常漂移对比（`compare_quality_snapshots` 与命令行 `dq snapshot-diff`）。
 - 已实现：两份字段血缘快照的比较（`compare_lineage_snapshots` 与命令行 `dq lineage-diff`）：比较两份内存中的字段血缘快照，并为目标字段给出上下游可达字段与诱导边差异，不修改记录、不落盘、不访问服务。
 - 已实现：跨数据集引用完整性校验（`validate_references` 与命令行 `dq reference-integrity`）。
@@ -848,6 +849,97 @@ result = analyze_field_impacts(payload)
 
 命令行 `dq field-impact` 下，`ImpactInputError` 统一映射为错误码 `INVALID_IMPACT_INPUT`（退出码 2）；无法解析为 UTF-8 JSON 时仍为 `INVALID_JSON`，不返回部分结果。
 
+## 变更影响分析
+
+`analyze_change_impact` 是独立于规则校验与血缘查询的新功能：调用方提交**入口数据集标识、变更类型和变更字段**，功能沿已登记的有向血缘边找到直接或间接下游，返回入口变更摘要、受影响数据集、每个数据集的受影响字段、字段来源与入口到该数据集的稳定最短路径。整个过程只计算潜在下游影响，**不修改数据、规则或血缘元数据，不落盘、不访问服务**；重复调用或并发请求都得到相同顺序与一致结果。
+
+```python
+from data_quality import analyze_change_impact
+
+result = analyze_change_impact(payload)
+```
+
+- `payload`：删除与重命名时恰好含 `dataset`、`changeType`、`fields`、`metadata` 四个键；类型变更时再含 `newType` 共五个键（键多余或缺失均抛错）。
+  - `dataset`：入口数据集标识，非空字符串，区分大小写。
+  - `changeType`：只接受 `"delete"`（删除）、`"rename"`（重命名）、`"type_change"`（类型变更）。
+  - `fields`：删除与类型变更时为**非空**的字段名（非空字符串）数组，数组内不可重复；重命名时为恰好含 `oldField`、`newField` 两个非空字符串键的单个对象。
+  - `newType`：仅类型变更出现；新的原始类型值（任意 JSON 值），与元数据中的原始类型按 JSON 结构相等比较（布尔不与数字相等）。
+  - `metadata`：恰好含 `datasets`、`edges` 两个键的已登记元数据。
+    - `datasets`：对象，键为非空数据集 id，值为字段声明数组；每个声明恰好含 `name`（非空字段名，同一数据集内不可重复）与 `type`（类型值，**原样保留**，可以是任意 JSON 值）。
+    - `edges`：有向边数组，边由 `source` 指向 `target`；每个端点要么是数据集级 `{"dataset"}`，要么是列级 `{"dataset", "field"}`，同一条边两端粒度必须一致，端点必须已在 `datasets` 声明；列端点的字段必须已声明。重复边报错；自环与环路合法。
+- 删除表示入口字段消失；重命名表示旧字段迁移到新字段（旧字段的下游与新字段已登记的下游合并考虑，但输出仍是**一条**变更摘要）；类型变更表示同一字段语义类型改变，只比较原始类型，类型值相同（结构相等）的字段不产生影响。
+- 只沿**确认方向**的依赖边向下游走：无法证明方向的关系不会把上游误报为受影响对象。遍历对自环与环路安全（可达均指至少跨过一条边，同一条路径不重复节点），不会死循环。
+- 字段影响只采信**可证明的列级依赖**：只能沿列级边到达的字段才列为受影响字段；仅有数据集级依赖可达时，受影响字段为空并标记 `unknown: true`，绝不按字段名猜测。数据集图的边为显式数据集级边，加上**源列可由变更字段沿列级边证明到达**的列级边在两端数据集上的投影（源列与变更无关的列级边不投影，不会把无关数据集报为下游）。
+- 一个下游字段依赖多个入口字段时，各入口字段分别保留为独立来源。
+
+### 变更影响返回结果
+
+```json
+{
+  "status": "ok",
+  "change": {
+    "dataset": "ods",
+    "changeType": "delete",
+    "fields": ["name"]
+  },
+  "affectedDatasets": [
+    {
+      "dataset": "dwd",
+      "distance": 1,
+      "unknown": false,
+      "fields": [
+        {
+          "field": "label",
+          "sources": [
+            {
+              "dataset": "ods",
+              "field": "name",
+              "path": [
+                {"dataset": "ods", "field": "name"},
+                {"dataset": "dwd", "field": "label"}
+              ]
+            }
+          ]
+        }
+      ],
+      "path": [{"dataset": "ods"}, {"dataset": "dwd"}]
+    },
+    {
+      "dataset": "rpt",
+      "distance": 2,
+      "unknown": true,
+      "fields": [],
+      "path": [{"dataset": "ods"}, {"dataset": "dwd"}, {"dataset": "rpt"}]
+    }
+  ]
+}
+```
+
+- 顶层 `status` 恒为 `"ok"`；`change` 为入口变更摘要：删除/类型变更含 `dataset`、`changeType`、`fields`（类型变更只含实际改变了类型的字段，并另含原始 `newType`），重命名含 `dataset`、`changeType`、`oldField`、`newField`。
+- `affectedDatasets` 为沿已登记边跨至少一条边可达的全部下游数据集，按血缘距离升序、同距离按数据集标识升序排列；**没有下游时为空列表，但入口摘要照常返回**。
+- 每个受影响数据集恰好含 `dataset`、`distance`、`unknown`、`fields`、`path`：
+  - `distance`：从入口数据集到该数据集的最短边数（沿显式数据集级边与源列已证明可达的列边投影构成的数据集图）。
+  - `path`：入口数据集到该数据集的稳定最短数据集序列（两端都含，项为 `{"dataset"}`）；等长等价路径取节点标识字典序最小者。
+  - `unknown`：该数据集只能由数据集级依赖证明可达时为 `true`，此时 `fields` 为空数组；存在可证明的列级命中字段时为 `false`。
+  - `fields`：实际命中的受影响字段，按字段名升序；每项含 `field` 与 `sources`。
+  - `sources`：可证明到达该字段的每个入口字段各占一项，按 `(dataset, field)` 升序；每项含入口字段引用 `dataset`、`field` 与列级 `path`（入口字段到该字段的最短字段引用序列，两端都含、至少一条边，项为 `{"dataset", "field"}`；等长取字典序最小序列）。
+- 重命名摘要只有一条；旧字段删除影响与新字段依赖影响在同一结果中合并，下游字段的 `sources` 会分别保留 `oldField` 与 `newField` 两个来源。
+
+### 变更影响错误
+
+以下情况抛出 `ChangeImpactError` 子类（均为 `ValueError` 子类，公开于 `data_quality`，携带稳定 `code`），**不返回部分结果**，也不改用其他异常：
+
+| 异常 | 错误码 | 触发情形 |
+| --- | --- | --- |
+| `ChangeImpactInputError` | `INVALID_CHANGE_IMPACT_INPUT` | 请求或 `metadata` 不是对象、顶层键缺失/多余、`changeType` 非法、标识为空或非字符串、字段声明或边结构非法（含端点未声明、粒度混用、重复边、重复字段声明）等一切结构问题 |
+| `DatasetNotFoundError` | `DATASET_NOT_FOUND` | 入口数据集未在 `metadata.datasets` 中登记 |
+| `FieldNotFoundError` | `FIELD_NOT_FOUND` | 删除/类型变更的入口字段，或重命名的 `oldField` 未在入口数据集元数据中登记 |
+| `InvalidRenameError` | `INVALID_RENAME` | 重命名前后字段同名 |
+| `DuplicateFieldError` | `DUPLICATE_FIELD` | 删除/类型变更的字段数组内出现重复字段 |
+| `InvalidFieldsError` | `INVALID_FIELDS` | 删除/类型变更的字段集合为空 |
+
+校验顺序为：结构形状（含 `changeType`、顶层键集合与 `metadata` 图结构）→ 字段集合为空 → 重命名同名 → 字段重复 → 入口数据集登记性 → 入口字段登记性。重命名的 `newField` 未登记不报错（视作新字段尚无已登记下游）；类型变更中与原始类型相同的字段不报错、不产生影响。
+
 ## 两次快照的异常漂移对比
 
 `compare_quality_snapshots` 在既有校验结果与字段血缘之上，消费两次已经评估完成的快照（`baseline` 与 `current`），只比较其中 `violated=true` 的异常，不重跑任何规则、不修改输入，仅经返回值（命令行经标准输出）给出结果。
@@ -1515,6 +1607,45 @@ dq field-impact < field-impact.json
 - `INVALID_IMPACT_INPUT`：顶层不是对象，或五个顶层键的嵌套结构、键集合、字段引用、规则状态、样本映射不符合公开契约。
 
 出错时仅输出 `{"error": {"code": ..., "message": ...}}`，不返回部分结果。除标准输入与标准输出外，不写文件、不访问外部服务。
+
+### dq change-impact
+
+从标准输入读取变更影响分析的 UTF-8 JSON 对象；删除与重命名恰好含 `dataset`、`changeType`、`fields`、`metadata` 四个键，类型变更再含 `newType`（键多余或缺失均报错），契约与 `analyze_change_impact` 的 Python 输入完全相同：
+
+```bash
+dq change-impact < change.json
+```
+
+```json
+{
+  "dataset": "ods",
+  "changeType": "rename",
+  "fields": {"oldField": "name", "newField": "full_name"},
+  "metadata": {
+    "datasets": {
+      "ods": [
+        {"name": "name", "type": "string"},
+        {"name": "full_name", "type": "string"}
+      ],
+      "dwd": [{"name": "label", "type": "string"}]
+    },
+    "edges": [
+      {"source": {"dataset": "ods", "field": "name"},
+       "target": {"dataset": "dwd", "field": "label"}}
+    ]
+  }
+}
+```
+
+合法输入退出码为 0（即使没有任何下游也退出 0、`affectedDatasets` 为空列表并保留入口摘要），标准输出只写一行与 `analyze_change_impact` 完全相同的结果 JSON（`status`、`change`、`affectedDatasets`；字段来源、unknown 标记、距离与路径排序等语义均不改变），只处理内存、不修改数据/规则/血缘元数据、不落盘、不访问服务。输入有误时退出码为 2 且 `message` 非空，标准输出仅含顶层 `error` 对象（只有 `code`、`message` 两个键），不返回部分结果，错误码依次为：
+
+- `INVALID_JSON`：输入不是合法 UTF-8 或无法解析为 JSON。
+- `INVALID_CHANGE_IMPACT_INPUT`：请求或元数据结构、键集合、标识、字段声明或边非法。
+- `DATASET_NOT_FOUND`：入口数据集未登记。
+- `FIELD_NOT_FOUND`：入口字段（重命名时为 `oldField`）未在入口数据集登记。
+- `INVALID_RENAME`：重命名前后字段同名。
+- `DUPLICATE_FIELD`：请求内字段重复。
+- `INVALID_FIELDS`：字段集合为空。
 
 ### dq snapshot-diff
 

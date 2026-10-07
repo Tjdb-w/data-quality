@@ -7,6 +7,7 @@
 ``dq linked-origins``,
 ``dq field-impact``, ``dq query-results``, ``dq snapshot-diff``,
 ``dq lineage-diff``,
+``dq change-impact``,
 ``dq reference-integrity``, ``dq quality-gates``.
 
 All subcommands read a UTF-8 JSON object from standard input and write a
@@ -59,6 +60,11 @@ check-result keys and adds the shortest undirected ``sample_path`` and
 the forward field-lineage ``path``, all computed in memory.
 ``dq field-impact`` reads ``{"datasets": {...}, "lineageEdges": [...],
 "validationResults": [...], "anomalySamples": {...}, "seedFields": [...]}``.
+``dq change-impact`` reads ``{"dataset": ..., "changeType": ...,
+"fields": ..., "metadata": {"datasets": {...}, "edges": [...]},
+"newType": ...}`` (``newType`` only for a type change) and reports the
+datasets and provably affected fields downstream of one entry dataset
+change without modifying records, metadata or anything on disk.
 ``dq snapshot-diff`` reads ``{"baseline": {"results": [...]},
 "current": {"results": [...]}, "lineage": {...}}`` and consumes already
 evaluated check results without re-running any rule.
@@ -144,6 +150,17 @@ the process exits with status 2:
 * ``INVALID_IMPACT_INPUT``            - field-impact payload structure, key
                                         set, references, rule statuses or
                                         sample mapping is malformed
+* ``INVALID_CHANGE_IMPACT_INPUT``     - change-impact request or lineage
+                                        metadata structure is malformed
+* ``DATASET_NOT_FOUND``               - change-impact entry dataset is not
+                                        declared
+* ``FIELD_NOT_FOUND``                 - change-impact entry field is not
+                                        declared
+* ``INVALID_RENAME``                  - change-impact rename old and new
+                                        field names are equal
+* ``DUPLICATE_FIELD``                 - change-impact request lists a
+                                        field more than once
+* ``INVALID_FIELDS``                  - change-impact field set is empty
 * ``INVALID_SNAPSHOT_INPUT``          - snapshot-diff snapshots/results/
                                         lineage are malformed
 * ``UNKNOWN_SNAPSHOT_REFERENCE``      - snapshot-diff result references an
@@ -187,6 +204,10 @@ from .batch_rules import (
     InvalidBatchInputError,
     InvalidBatchRuleError,
     evaluate_batch_rules,
+)
+from .change_impact import (
+    ChangeImpactError,
+    analyze_change_impact,
 )
 from .composite import query_composite_results
 from .correlation import (
@@ -870,6 +891,21 @@ def _run_quality_gates() -> int:
     return EXIT_OK
 
 
+def _run_change_impact() -> int:
+    payload = _read_json_payload()
+    if payload is _PARSE_FAILED:
+        return EXIT_ERROR
+
+    try:
+        result = analyze_change_impact(payload)
+    except ChangeImpactError as exc:
+        return _emit_error(exc.code, str(exc))
+
+    json.dump(result, sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+    return EXIT_OK
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="dq",
@@ -975,6 +1011,14 @@ def build_parser() -> argparse.ArgumentParser:
         "JSON object on standard input",
     )
     field_impact_parser.set_defaults(handler=_run_field_impact)
+
+    change_impact_parser = subparsers.add_parser(
+        "change-impact",
+        help="analyze downstream impact of an entry dataset change "
+        "(deletion, rename or type change) over registered dataset and "
+        "field lineage from a UTF-8 JSON object on standard input",
+    )
+    change_impact_parser.set_defaults(handler=_run_change_impact)
 
     query_results_parser = subparsers.add_parser(
         "query-results",
