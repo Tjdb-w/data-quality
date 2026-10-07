@@ -69,6 +69,13 @@ from .reference_integrity import (
     UnknownReferenceDatasetError,
     validate_references,
 )
+from .sample_lineage import (
+    InvalidSampleLineageInputError,
+    InvalidSampleLineageQueryError,
+    UnknownSampleLineageReferenceError,
+    UnknownSampleLineageTargetError,
+    trace_sample_lineage,
+)
 from .snapshot_diff import (
     InvalidSnapshotInputError,
     UnknownSnapshotReferenceError,
@@ -86,6 +93,7 @@ __all__ = [
     "evaluate_batch_rules",
     "trace_lineage",
     "trace_field_lineage",
+    "trace_sample_lineage",
     "explain_lineage_paths",
     "explain_field_lineage_paths",
     "correlate_violations",
@@ -120,6 +128,10 @@ __all__ = [
     "InvalidFieldLineageInputError",
     "InvalidFieldLineageQueryError",
     "UnknownFieldLineageTargetError",
+    "InvalidSampleLineageInputError",
+    "InvalidSampleLineageQueryError",
+    "UnknownSampleLineageTargetError",
+    "UnknownSampleLineageReferenceError",
     "LineageNodeNotFoundError",
     "InvalidCorrelationInputError",
     "UnknownCorrelationReferenceError",

@@ -11,6 +11,7 @@
 - 已实现：独立的数据质量规则校验（Python 包 `data_quality` 与命令行 `dq validate`）。
 - 已实现：上下游血缘追溯（`trace_lineage` 与命令行 `dq lineage`）。
 - 已实现：字段级上下游血缘追溯（`trace_field_lineage` 与命令行 `dq field-lineage`）。
+- 已实现：样本级上下游血缘追溯（`trace_sample_lineage` 与命令行 `dq sample-lineage`）：在字段边与无向样本关联上按样本见证关系追溯样本，不修改记录、不落盘、不访问服务。
 - 已实现：血缘路径解释与影响范围查询（`explain_lineage_paths` / `explain_field_lineage_paths` 与命令行 `dq lineage-paths` / `dq field-lineage-paths`）。
 - 已实现：异常样本跨规则关联定位（`correlate_violations` 与命令行 `dq correlate`）。
 - 已实现：跨数据集关联样本的异常关联定位（`correlate_linked_violations` 与命令行 `dq correlate-links`）。
@@ -450,6 +451,82 @@ result = explain_lineage_paths(nodes, edges, target, direction="both", max_depth
 - `LineageNodeNotFoundError`（`ValueError` 子类，属性 `code = "LINEAGE_NODE_NOT_FOUND"`）：`target` 未在图中声明。此错误码为两个入口共用，节点级与字段级一致。
 
 校验顺序为图结构 → 查询参数 → target 声明性，与血缘追溯保持一致。
+
+## 样本级血缘追溯
+
+`samples` 声明已知样本，`fields`、`edges` 沿用字段级血缘语义（边由 `source` 字段指向 `target` 字段，两端均在 `fields` 声明），每条字段边额外携带 `witnesses`；`sample_links` 为样本间的无向关联。样本之间每跨过一条关系（一条被见证的字段边或一条样本关联）深度加 1。
+
+```python
+from data_quality import trace_sample_lineage
+
+result = trace_sample_lineage(samples, fields, edges, sample_links,
+                              target, direction="both", max_depth=None)
+```
+
+- `samples`：样本对象列表，每条恰好含 `dataset_id`、`sample_id` 两个非空字符串键；样本不可重复。
+- `fields`：与字段级血缘一致：对象，键为非空表 id，值为互不重复的非空字段 id 列表。
+- `edges`：恰好含 `source`、`target`、`witnesses` 三键的对象列表。`source`/`target` 为只含 `table`、`column` 且已声明的字段，边由 source 指向 target，重复边报错，自环与环路合法。`witnesses` 为互不重复的见证列表，每条恰好含 `dataset_id`、`sample_id`、`table`、`column` 四个非空字符串键；其样本必须在 `samples` 声明、字段必须在 `fields` 声明，且 `(table, column)` 必须**匹配该边的 source 或 target 字段对**。
+- `sample_links`：无向关联列表，每条恰好含 `left`、`right`，两端均为只含 `dataset_id`、`sample_id` 的对象；自链接、重复关系（含左右反转）报错，两端都必须在 `samples` 中声明。
+- `target`：追溯起点样本，只含 `dataset_id`、`sample_id` 两个键。
+- `direction`：`upstream`（沿字段边反向：target 字段见证样本 → source 字段见证样本；`sample_links` 两个方向都可跨）、`downstream`（沿字段边正向：source → target；`sample_links` 两个方向都可跨）或 `both`（默认）。
+- `max_depth`：`null`（默认，不限深度）或大于等于 0 的整数；布尔值不算整数；`0` 时只含 `target`。
+
+### 样本级血缘返回结果
+
+```json
+{
+  "target": {"dataset_id": "dwd", "sample_id": "b"},
+  "direction": "both",
+  "max_depth": null,
+  "upstream": {
+    "samples": [
+      {"dataset_id": "dwd", "sample_id": "b", "depth": 0},
+      {"dataset_id": "ods", "sample_id": "a", "depth": 1}
+    ],
+    "edges": [
+      {
+        "source": {"table": "ods", "column": "name"},
+        "target": {"table": "dwd", "column": "label"},
+        "witnesses": [
+          {"dataset_id": "dwd", "sample_id": "b", "table": "dwd", "column": "label"},
+          {"dataset_id": "ods", "sample_id": "a", "table": "ods", "column": "name"}
+        ]
+      }
+    ]
+  },
+  "downstream": {
+    "samples": [
+      {"dataset_id": "dwd", "sample_id": "b", "depth": 0},
+      {"dataset_id": "ads", "sample_id": "c", "depth": 1}
+    ],
+    "edges": [
+      {
+        "source": {"table": "dwd", "column": "label"},
+        "target": {"table": "ads", "column": "label"},
+        "witnesses": [
+          {"dataset_id": "ads", "sample_id": "c", "table": "ads", "column": "label"},
+          {"dataset_id": "dwd", "sample_id": "b", "table": "dwd", "column": "label"}
+        ]
+      }
+    ]
+  }
+}
+```
+
+- 结果回显 `target`、`direction`、`max_depth`，并含 `upstream`、`downstream` 两侧，各含 `samples`、`edges`；只查一侧时另一侧为 `{"samples": [], "edges": []}`。
+- 样本为 `{"dataset_id", "sample_id", "depth"}`：`target` 深度为 0，同一 BFS 中首次到达为准（最短深度唯一出现），按 `(depth, dataset_id, sample_id)` 排序。
+- 边为该侧两端样本均到达的**全部字段边**：即至少一个已到达样本见证 source 字段、至少一个已到达样本见证 target 字段；边按见证样本引用（再按 source/target 字段引用）排序。
+- 每条边保留原始 `source`、`target` 字段引用，`witnesses` 只列匹配该边 `(table, column)` 对的见证（本实现中所有合法见证均匹配），按字段引用（`table`、`column`）再按样本引用（`dataset_id`、`sample_id`）排序。
+- 目标与任何关系都不通时，两侧均只含 `target`、`edges` 为空，仍为成功结果。
+
+### 样本级血缘错误
+
+- `InvalidSampleLineageInputError`（`ValueError` 子类）：`samples`/`fields`/`edges`/`sample_links` 结构有误、标识为空、样本/字段/见证/边/关联重复、边端点或见证引用未声明、见证 `(table, column)` 不匹配所在边的 source/target、自链接。
+- `InvalidSampleLineageQueryError`（`ValueError` 子类）：`target` 不是只含 `dataset_id`、`sample_id` 的非空字符串对象、`direction` 非法、`max_depth` 不是 `null` 或非负非布尔整数。
+- `UnknownSampleLineageTargetError`（`LookupError` 子类）：`target` 未在 `samples` 中声明。
+- `UnknownSampleLineageReferenceError`（`LookupError` 子类）：`sample_links` 端点未在 `samples` 中声明。
+
+校验顺序为输入结构（samples → fields → edges → sample_links 形状与重复）→ 查询参数（direction、max_depth、target 形状）→ target 声明性 → sample_links 端点引用；结构错误先于未知引用错误，未知 target 先于未知关联端点。
 
 ## 异常样本跨规则关联定位
 
@@ -1105,6 +1182,46 @@ dq field-lineage-paths < field-lineage.json
 - `INVALID_FIELD_LINEAGE_INPUT`：`fields`/`edges` 结构、端点或重复项有误。
 - `INVALID_FIELD_LINEAGE_QUERY`：`target`/`direction`/`max_depth` 非法。
 - `LINEAGE_NODE_NOT_FOUND`：`target` 未在 `fields` 中声明。
+
+### dq sample-lineage
+
+从标准输入读取样本级血缘的 UTF-8 JSON 对象（`samples`、`fields`、`edges`、`sample_links`、`target` 必填；`direction`、`max_depth` 可省略，默认 `both` 与 `null`）：
+
+```bash
+dq sample-lineage < sample-lineage.json
+```
+
+```json
+{
+  "samples": [
+    {"dataset_id": "ods", "sample_id": "a"},
+    {"dataset_id": "dwd", "sample_id": "b"}
+  ],
+  "fields": {"ods": ["name"], "dwd": ["label"]},
+  "edges": [
+    {
+      "source": {"table": "ods", "column": "name"},
+      "target": {"table": "dwd", "column": "label"},
+      "witnesses": [
+        {"dataset_id": "ods", "sample_id": "a", "table": "ods", "column": "name"},
+        {"dataset_id": "dwd", "sample_id": "b", "table": "dwd", "column": "label"}
+      ]
+    }
+  ],
+  "sample_links": [],
+  "target": {"dataset_id": "dwd", "sample_id": "b"}
+}
+```
+
+合法查询退出码为 0 并在标准输出写一行上述样本级血缘结果 JSON（无亲属时只含 `target`，仍退出 0）；输入有误时退出码为 2 且 `message` 非空，错误码依次为：
+
+- `INVALID_JSON`：输入不是合法 UTF-8 或无法解析为 JSON。
+- `INVALID_SAMPLE_LINEAGE_INPUT`：`samples`/`fields`/`edges`/`sample_links` 结构、标识、重复项或见证引用有误。
+- `INVALID_SAMPLE_LINEAGE_QUERY`：`target`/`direction`/`max_depth` 非法。
+- `UNKNOWN_SAMPLE_LINEAGE_TARGET`：`target` 未在 `samples` 中声明。
+- `UNKNOWN_SAMPLE_LINEAGE_REFERENCE`：`sample_links` 端点未在 `samples` 中声明。
+
+除标准输入与标准输出外，不写文件、不访问外部服务。
 
 ### dq correlate
 
